@@ -360,6 +360,15 @@
       console.error("[VECTOR] frame error (loop continues):", err);
     }
 
+    // Belt-and-suspenders: attempt the live bets render unconditionally,
+    // every frame, regardless of phase or whatever happened above. Its own
+    // internals are already individually guarded (see renderLiveBets).
+    try {
+      renderLiveBets();
+    } catch (err) {
+      console.error("[VECTOR] live bets render failed:", err);
+    }
+
     animRafId = requestAnimationFrame(tick);
   }
 
@@ -724,46 +733,88 @@
     }
   }
 
-  function renderLiveBets() {
-    const rows = [];
+  // Builds one <li class="bet-row"> via plain DOM calls (createElement /
+  // textContent) rather than an innerHTML template string — avoids any
+  // possibility of a malformed string breaking the whole list, and each
+  // row is independently guarded so one bad entry can't blank the rest.
+  function buildBetRow(name, amount, tagCls, tagText, isSelf) {
+    const li = document.createElement("li");
+    li.className = isSelf ? "bet-row is-self" : "bet-row";
 
-    if (state.bet) {
-      const tag = state.bet.resolved
-        ? state.bet.lost
-          ? { cls: "tag-crash", text: "CRASH" }
-          : state.bet.mode === MODE.OVERDRIVE
-          ? { cls: "tag-overdrive", text: "OVERDRIVE" }
-          : { cls: "tag-cruise", text: "CRUISE" }
-        : { cls: "tag-waiting", text: state.phase === PHASE.COUNTDOWN ? "PENDING" : "IN FLIGHT" };
-      rows.push(
-        `<li class="bet-row is-self">
-          <span class="bet-name">You</span>
-          <span class="bet-amount">${formatMoney(state.bet.amount)}</span>
-          <span class="bet-tag ${tag.cls}">${tag.text}</span>
-        </li>`
-      );
+    const nameEl = document.createElement("span");
+    nameEl.className = "bet-name";
+    nameEl.textContent = name;
+
+    const amountEl = document.createElement("span");
+    amountEl.className = "bet-amount";
+    amountEl.textContent = formatMoney(amount);
+
+    const tagEl = document.createElement("span");
+    tagEl.className = `bet-tag ${tagCls}`;
+    tagEl.textContent = tagText;
+
+    li.appendChild(nameEl);
+    li.appendChild(amountEl);
+    li.appendChild(tagEl);
+    return li;
+  }
+
+  function renderLiveBets() {
+    if (!el.liveBetsList) return;
+
+    // Self-healing: a live round should never have zero NPCs. If it
+    // somehow does (whatever the cause), regenerate right here rather
+    // than leaving the panel empty for the rest of the round.
+    if ((state.phase === PHASE.COUNTDOWN || state.phase === PHASE.RUNNING) && state.npcs.length === 0 && state._rng) {
+      try {
+        generateNpcs();
+      } catch (err) {
+        console.error("[VECTOR] NPC regeneration failed:", err);
+      }
+    }
+
+    const frag = document.createDocumentFragment();
+    let rowCount = 0;
+
+    try {
+      if (state.bet) {
+        const tag = state.bet.resolved
+          ? state.bet.lost
+            ? { cls: "tag-crash", text: "CRASH" }
+            : state.bet.mode === MODE.OVERDRIVE
+            ? { cls: "tag-overdrive", text: "OVERDRIVE" }
+            : { cls: "tag-cruise", text: "CRUISE" }
+          : { cls: "tag-waiting", text: state.phase === PHASE.COUNTDOWN ? "PENDING" : "IN FLIGHT" };
+        frag.appendChild(buildBetRow("You", state.bet.amount, tag.cls, tag.text, true));
+        rowCount++;
+      }
+    } catch (err) {
+      console.error("[VECTOR] failed to render own bet row:", err);
     }
 
     for (const npc of state.npcs) {
-      let tag;
-      if (npc.status === "waiting") tag = { cls: "tag-waiting", text: "IN FLIGHT" };
-      else if (npc.status === "crash") tag = { cls: "tag-crash", text: "CRASH" };
-      else if (npc.status === "overdrive")
-        tag = { cls: "tag-overdrive", text: `${formatMult(npc.cashedAt)}` };
-      else tag = { cls: "tag-cruise", text: `${formatMult(npc.cashedAt)}` };
-
-      rows.push(
-        `<li class="bet-row">
-          <span class="bet-name">${npc.name}</span>
-          <span class="bet-amount">${formatMoney(npc.amount)}</span>
-          <span class="bet-tag ${tag.cls}">${tag.text}</span>
-        </li>`
-      );
+      try {
+        let tag;
+        if (npc.status === "waiting") tag = { cls: "tag-waiting", text: "IN FLIGHT" };
+        else if (npc.status === "crash") tag = { cls: "tag-crash", text: "CRASH" };
+        else if (npc.status === "overdrive") tag = { cls: "tag-overdrive", text: formatMult(npc.cashedAt) };
+        else tag = { cls: "tag-cruise", text: formatMult(npc.cashedAt) };
+        frag.appendChild(buildBetRow(npc.name, npc.amount, tag.cls, tag.text, false));
+        rowCount++;
+      } catch (err) {
+        console.error("[VECTOR] failed to render NPC row:", npc, err);
+      }
     }
 
-    el.liveBetsList.innerHTML = rows.length
-      ? rows.join("")
-      : `<li class="empty-row">No bets this round yet</li>`;
+    if (rowCount === 0) {
+      const empty = document.createElement("li");
+      empty.className = "empty-row";
+      empty.textContent = "No bets this round yet";
+      frag.appendChild(empty);
+    }
+
+    while (el.liveBetsList.firstChild) el.liveBetsList.removeChild(el.liveBetsList.firstChild);
+    el.liveBetsList.appendChild(frag);
   }
 
   function renderHistory() {
@@ -1441,9 +1492,10 @@
     const bodyAlpha = Math.max(0, 1 - Math.pow(jumpP, 1.4));
 
     // Exhaust grows visibly bigger and brighter through the charge, then
-    // stays lit (slowly dimming) through the jump — the "prepares to jump"
-    // beat the ship needed.
-    const exhaustGrow = p < CHARGE_END ? chargeP : Math.max(0, 1 - jumpP * 0.7);
+    // cuts off quickly once the jump actually begins — engines flaring
+    // is the "prepares to jump" beat, but they shouldn't still be glowing
+    // once the ship is most of the way through launching.
+    const exhaustGrow = p < CHARGE_END ? chargeP : Math.max(0, 1 - jumpP * 1.8);
     if (exhaustGrow > 0.02) {
       const glowR = 6 + exhaustGrow * 16;
       ctx.fillStyle = `rgba(226,255,214,${(exhaustGrow * 0.55).toFixed(3)})`;
@@ -1476,17 +1528,37 @@
       ctx.restore();
     }
 
-    // One clean bloom as it vanishes.
+    // Lens-flare streak as it vanishes — an anisotropic sliver (a tall
+    // thin gradient line plus a faint horizontal cross-accent) rather than
+    // a circular bloom, so it never competes with the round engine glow
+    // above it and doesn't read as another "circle appearing".
     if (flashP > 0.02) {
-      const flashAlpha = flashP < 0.6 ? flashP / 0.6 : 1 - (flashP - 0.6) / 0.4;
-      const r = 6 + flashP * 30;
-      const flashGrad = ctx.createRadialGradient(x, y, 0, x, y, r);
-      flashGrad.addColorStop(0, `rgba(255,255,238,${(Math.max(0, flashAlpha) * 0.9).toFixed(3)})`);
-      flashGrad.addColorStop(1, "rgba(186,255,107,0)");
-      ctx.fillStyle = flashGrad;
+      const flashAlpha = Math.max(0, flashP < 0.5 ? flashP / 0.5 : 1 - (flashP - 0.5) / 0.5);
+      const len = 10 + flashP * 70;
+
+      const vGrad = ctx.createLinearGradient(x, y - len, x, y + len);
+      vGrad.addColorStop(0, "rgba(219,255,171,0)");
+      vGrad.addColorStop(0.5, `rgba(255,255,238,${(flashAlpha * 0.95).toFixed(3)})`);
+      vGrad.addColorStop(1, "rgba(219,255,171,0)");
+      ctx.strokeStyle = vGrad;
+      ctx.lineWidth = 2 + flashP * 1.5;
+      ctx.lineCap = "round";
       ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.moveTo(x, y - len);
+      ctx.lineTo(x, y + len);
+      ctx.stroke();
+
+      const hLen = len * 0.5;
+      const hGrad = ctx.createLinearGradient(x - hLen, y, x + hLen, y);
+      hGrad.addColorStop(0, "rgba(219,255,171,0)");
+      hGrad.addColorStop(0.5, `rgba(255,255,238,${(flashAlpha * 0.55).toFixed(3)})`);
+      hGrad.addColorStop(1, "rgba(219,255,171,0)");
+      ctx.strokeStyle = hGrad;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(x - hLen, y);
+      ctx.lineTo(x + hLen, y);
+      ctx.stroke();
     }
   }
 
@@ -1651,6 +1723,24 @@
     startCountdown();
     lastFrameTime = performance.now();
     animRafId = requestAnimationFrame(tick);
+
+    // Independent heartbeat for the live bets list only, on a completely
+    // separate browser scheduling path (setInterval, not
+    // requestAnimationFrame). Redundant with the per-frame call in tick(),
+    // deliberately so — if anything ever interferes with the rAF-driven
+    // path specifically, this still keeps the panel populated.
+    setInterval(() => {
+      try {
+        renderLiveBets();
+      } catch (err) {
+        console.error("[VECTOR] live bets heartbeat render failed:", err);
+      }
+    }, 500);
+
+    // Diagnostic hook only — lets state be inspected from the browser
+    // console (e.g. `__VECTOR_DEBUG__.state.npcs.length`) without changing
+    // any gameplay behaviour.
+    window.__VECTOR_DEBUG__ = { state, CONFIG, el };
   }
 
   if (document.readyState === "loading") {
