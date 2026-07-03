@@ -46,14 +46,43 @@
     CASHOUT_TRAIL_FADE_MS: 1800, // how long the afterimage streak lingers once the ship is gone
     QUICK_AMOUNTS: [10, 25, 50, 100],
     HISTORY_LENGTH: 20,
-    NPC_MIN: 5,
-    NPC_MAX: 9,
+    // Table size: 3-5 opponents + the player = a table of 4-6 total,
+    // matching the "small table, visible fleet" concept rather than an
+    // anonymous scrolling list.
+    NPC_MIN: 3,
+    NPC_MAX: 5,
     NPC_NAMES: [
       "Kestrel_09", "Nyx.Vega", "Halcyon", "0xDrift", "Ionis", "Mara_K",
       "Pulsegrid", "Vantablk", "Wraith77", "Sable_Q", "Toru.eth", "Cinder",
       "Nova_Line", "Aeon_7", "Riven", "Kilo.Zed", "Ember_X", "Glasswing",
     ],
+    // Identity colours for opponent ships/leaderboard icons. Deliberately
+    // desaturated ("squadron badge" rather than rainbow) and kept clear of
+    // the player's own functional colours (cyan cruise, violet-magenta
+    // overdrive, gold-green success, red crash) so an opponent's identity
+    // colour is never mistaken for a state change on the player's own ship.
+    FLEET_COLORS: [
+      { r: 255, g: 198, b: 92 },  // solar gold
+      { r: 77, g: 217, b: 168 },  // emerald
+      { r: 255, g: 111, b: 168 }, // rose
+      { r: 207, g: 232, b: 255 }, // frost
+      { r: 155, g: 140, b: 255 }, // slate violet
+      { r: 255, g: 138, b: 92 },  // ember coral
+    ],
   };
+
+  // Formation slots for opponent ships, as fractional offsets from the
+  // player's own ship position (so they scale with canvas size). All sit
+  // within the same chase-camera depth band as the hero — nose away from
+  // camera, engines toward it — just smaller and offset left/right, never
+  // pushed up toward the vanishing point on their own.
+  const FLEET_SLOTS = [
+    { dxFrac: -0.16, dyFrac: -0.045, scale: 0.62 },  // closer left
+    { dxFrac: 0.155, dyFrac: -0.05, scale: 0.6 },    // closer right
+    { dxFrac: -0.245, dyFrac: -0.115, scale: 0.46 }, // farther left
+    { dxFrac: 0.235, dyFrac: -0.105, scale: 0.46 },  // farther right
+    { dxFrac: -0.02, dyFrac: -0.17, scale: 0.34 },   // farthest, center-back
+  ];
 
   const PHASE = {
     COUNTDOWN: "countdown",
@@ -492,11 +521,27 @@
     return Math.round(planned * 100) / 100;
   }
 
+  // Fisher-Yates using the round's seeded rng, so slot/colour assignment
+  // is deterministic per round like everything else NPC-related.
+  function shuffledIndices(count, rng) {
+    const arr = Array.from({ length: count }, (_, i) => i);
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      const tmp = arr[i];
+      arr[i] = arr[j];
+      arr[j] = tmp;
+    }
+    return arr;
+  }
+
   function generateNpcs() {
     const rng = state._rng;
     const count = CONFIG.NPC_MIN + Math.floor(rng() * (CONFIG.NPC_MAX - CONFIG.NPC_MIN + 1));
     const usedNames = new Set();
     const npcs = [];
+
+    const colorOrder = shuffledIndices(CONFIG.FLEET_COLORS.length, rng);
+    const slotOrder = shuffledIndices(FLEET_SLOTS.length, rng);
 
     for (let i = 0; i < count; i++) {
       let name;
@@ -518,6 +563,9 @@
         willOverdrive,
         status: "waiting", // waiting | cruise | overdrive | crash
         cashedAt: null,
+        warpBornAt: null, // set the instant this NPC cashes out, for its own mini warp animation
+        color: CONFIG.FLEET_COLORS[colorOrder[i % colorOrder.length]],
+        slot: FLEET_SLOTS[slotOrder[i % slotOrder.length]],
       });
     }
     state.npcs = npcs;
@@ -531,6 +579,7 @@
       if (currentMultiplier >= npc.planned) {
         npc.status = npc.willOverdrive ? "overdrive" : "cruise";
         npc.cashedAt = npc.planned;
+        npc.warpBornAt = performance.now();
         changed = true;
       }
     }
@@ -737,9 +786,21 @@
   // textContent) rather than an innerHTML template string — avoids any
   // possibility of a malformed string breaking the whole list, and each
   // row is independently guarded so one bad entry can't blank the rest.
-  function buildBetRow(name, amount, tagCls, tagText, isSelf) {
+  // Player's own ship keeps its functional cyan cruise colour for the
+  // leaderboard icon too — it's the one ship that never gets an assigned
+  // identity colour, since cyan/violet already mean something specific
+  // for the player (mode), not "who is this".
+  const SELF_SHIP_COLOR = { r: 79, g: 216, b: 255 };
+
+  function buildBetRow(name, amount, tagCls, tagText, isSelf, color) {
     const li = document.createElement("li");
     li.className = isSelf ? "bet-row is-self" : "bet-row";
+
+    const icon = document.createElement("span");
+    icon.className = "bet-ship-icon";
+    icon.setAttribute("aria-hidden", "true");
+    const c = color || SELF_SHIP_COLOR;
+    icon.style.borderBottomColor = `rgb(${c.r},${c.g},${c.b})`;
 
     const nameEl = document.createElement("span");
     nameEl.className = "bet-name";
@@ -753,6 +814,7 @@
     tagEl.className = `bet-tag ${tagCls}`;
     tagEl.textContent = tagText;
 
+    li.appendChild(icon);
     li.appendChild(nameEl);
     li.appendChild(amountEl);
     li.appendChild(tagEl);
@@ -785,7 +847,7 @@
             ? { cls: "tag-overdrive", text: "OVERDRIVE" }
             : { cls: "tag-cruise", text: "CRUISE" }
           : { cls: "tag-waiting", text: state.phase === PHASE.COUNTDOWN ? "PENDING" : "IN FLIGHT" };
-        frag.appendChild(buildBetRow("You", state.bet.amount, tag.cls, tag.text, true));
+        frag.appendChild(buildBetRow("You", state.bet.amount, tag.cls, tag.text, true, SELF_SHIP_COLOR));
         rowCount++;
       }
     } catch (err) {
@@ -799,7 +861,7 @@
         else if (npc.status === "crash") tag = { cls: "tag-crash", text: "CRASH" };
         else if (npc.status === "overdrive") tag = { cls: "tag-overdrive", text: formatMult(npc.cashedAt) };
         else tag = { cls: "tag-cruise", text: formatMult(npc.cashedAt) };
-        frag.appendChild(buildBetRow(npc.name, npc.amount, tag.cls, tag.text, false));
+        frag.appendChild(buildBetRow(npc.name, npc.amount, tag.cls, tag.text, false, npc.color));
         rowCount++;
       } catch (err) {
         console.error("[VECTOR] failed to render NPC row:", npc, err);
@@ -1267,6 +1329,7 @@
     }
     ctx.globalAlpha = 1;
 
+    drawFleet(now, ship);
     drawShip(ship.x, ship.y, now, palette, speed);
     drawCashoutTrailScar(now);
 
@@ -1344,6 +1407,146 @@
       }
     }
     ctx.globalAlpha = 1;
+  }
+
+  // ---- Fleet: the other 3-5 ships at the table -------------------------
+  // Cheap, "impressionistic" mini-ships — a flat-filled hull tinted with
+  // the NPC's own identity colour, no gradient/specular/shadow work like
+  // the hero gets. They sit in the same chase-camera depth band as the
+  // player (nose away from camera), just smaller and offset around them,
+  // so the scene reads as one fleet flying together rather than the hero
+  // plus a separate background element.
+
+  // Rotates a local-space offset (dx, dy) by `rotation` and places it at
+  // world-space (baseX, baseY) — used to keep engine glows/flares locked
+  // to a rotated ship's own axes instead of drifting off at a fixed
+  // world-space offset while the hull banks underneath them.
+  function rotatedOffset(baseX, baseY, dx, dy, rotation) {
+    const cos = Math.cos(rotation);
+    const sin = Math.sin(rotation);
+    return { x: baseX + dx * cos - dy * sin, y: baseY + dx * sin + dy * cos };
+  }
+
+  function drawFleetShip(x, y, scale, alpha, color, rotation) {
+    if (alpha <= 0 || scale <= 0.02) return;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(x, y);
+    if (rotation) ctx.rotate(rotation);
+    ctx.scale(scale, scale);
+
+    ctx.strokeStyle = `rgba(${color.r},${color.g},${color.b},0.32)`;
+    ctx.lineWidth = 2.4;
+    ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(-9, 19); ctx.lineTo(-9, 33); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(9, 19); ctx.lineTo(9, 33); ctx.stroke();
+
+    ctx.shadowColor = `rgba(${color.r},${color.g},${color.b},0.75)`;
+    ctx.shadowBlur = 9;
+    ctx.fillStyle = `rgba(${color.r},${color.g},${color.b},0.92)`;
+    ctx.beginPath();
+    ctx.moveTo(0, -34);
+    ctx.lineTo(38, 24);
+    ctx.lineTo(26, 32);
+    ctx.lineTo(9, 19);
+    ctx.lineTo(-9, 19);
+    ctx.lineTo(-26, 32);
+    ctx.lineTo(-38, 24);
+    ctx.closePath();
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    ctx.fillStyle = "rgba(255,255,255,0.9)";
+    ctx.beginPath(); ctx.arc(-19, 25, 2.6, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(19, 25, 2.6, 0, Math.PI * 2); ctx.fill();
+
+    ctx.restore();
+  }
+
+  // A smaller, colour-tinted echo of the player's own cashout warp —
+  // same charge/jump/flare structure and the same CONFIG.CASHOUT_WARP_MS
+  // duration, so every ship's departure reads as the same "move" at a
+  // consistent cadence, just in that ship's own identity colour instead
+  // of the universal success gold-green.
+  function drawFleetWarp(x, y, scaleBase, color, warpAge, rotation) {
+    const p = Math.min(1, warpAge / CONFIG.CASHOUT_WARP_MS);
+    const CHARGE_END = 0.28;
+    const JUMP_END = 0.72;
+    const chargeP = Math.min(1, p / CHARGE_END);
+    const jumpP = Math.min(1, Math.max(0, (p - CHARGE_END) / (JUMP_END - CHARGE_END)));
+    const jumpEased = jumpP * jumpP * (3 - 2 * jumpP);
+    const flashP = Math.min(1, Math.max(0, (p - JUMP_END) / (1 - JUMP_END)));
+
+    // Forward nudge follows the ship's own rotated "up" axis, not
+    // world-space up, so it moves in the direction it's actually facing.
+    const nudge = jumpEased * 14 * scaleBase;
+    const nose = rotatedOffset(x, y, 0, -nudge, rotation);
+    const xx = nose.x;
+    const yy = nose.y;
+
+    const scale = scaleBase * Math.max(0, 1 - jumpEased);
+    const bodyAlpha = Math.max(0, 1 - Math.pow(jumpP, 1.4));
+    const exhaustGrow = p < CHARGE_END ? chargeP : Math.max(0, 1 - jumpP * 1.8);
+
+    if (exhaustGrow > 0.02) {
+      const r = (3 + exhaustGrow * 8) * scaleBase;
+      const eL = rotatedOffset(x, y, -9 * scaleBase, 19 * scaleBase, rotation);
+      const eR = rotatedOffset(x, y, 9 * scaleBase, 19 * scaleBase, rotation);
+      ctx.fillStyle = `rgba(${color.r},${color.g},${color.b},${(exhaustGrow * 0.5).toFixed(3)})`;
+      ctx.beginPath(); ctx.arc(eL.x, eL.y, r, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(eR.x, eR.y, r, 0, Math.PI * 2); ctx.fill();
+    }
+
+    if (bodyAlpha > 0.03 && scale > 0.02) drawFleetShip(xx, yy, scale, bodyAlpha, color, rotation);
+
+    if (flashP > 0.02) {
+      const flashAlpha = Math.max(0, flashP < 0.5 ? flashP / 0.5 : 1 - (flashP - 0.5) / 0.5);
+      const len = (6 + flashP * 24) * scaleBase;
+      const p1 = rotatedOffset(xx, yy, 0, -len, rotation);
+      const p2 = rotatedOffset(xx, yy, 0, len, rotation);
+      const g = ctx.createLinearGradient(p1.x, p1.y, p2.x, p2.y);
+      g.addColorStop(0, `rgba(${color.r},${color.g},${color.b},0)`);
+      g.addColorStop(0.5, `rgba(255,255,238,${(flashAlpha * 0.9).toFixed(3)})`);
+      g.addColorStop(1, `rgba(${color.r},${color.g},${color.b},0)`);
+      ctx.strokeStyle = g;
+      ctx.lineWidth = 1.4;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.stroke();
+    }
+  }
+
+  function drawFleet(now, ship) {
+    const vp = vanishingPoint();
+    for (const npc of state.npcs) {
+      if (!npc.slot || !npc.color) continue;
+      const x = ship.x + npc.slot.dxFrac * cw;
+      const y = ship.y + npc.slot.dyFrac * ch;
+      // Bank toward the vanishing point — the same geometry that makes the
+      // spokes/rings converge applies to every ship's own facing, not just
+      // the centred hero (whose angle to vp happens to be perfectly
+      // vertical, so this is a no-op for it).
+      const rotation = Math.atan2(vp.y - y, vp.x - x) + Math.PI / 2;
+      const bob = prefersReducedMotion ? 0 : Math.sin(now / 560 + npc.slot.dxFrac * 10) * 2 * npc.slot.scale;
+
+      if (npc.status === "waiting") {
+        drawFleetShip(x, y + bob, npc.slot.scale, 1, npc.color, rotation);
+      } else if ((npc.status === "cruise" || npc.status === "overdrive") && npc.warpBornAt != null) {
+        const warpAge = now - npc.warpBornAt;
+        if (warpAge < CONFIG.CASHOUT_WARP_MS) {
+          drawFleetWarp(x, y + bob, npc.slot.scale, npc.color, warpAge, rotation);
+        }
+        // else: this ship has fully departed — draw nothing further
+      } else if (npc.status === "crash" && state.phase === PHASE.RESULT) {
+        const resultElapsed = now - (state.resultEndTime - CONFIG.RESULT_DISPLAY_SECONDS * 1000);
+        const fadeP = Math.min(1, resultElapsed / 500);
+        const alpha = 1 - fadeP;
+        const scale = npc.slot.scale * (1 - fadeP * 0.4);
+        if (alpha > 0.03) drawFleetShip(x, y + bob, scale, alpha, npc.color, rotation);
+      }
+    }
   }
 
   function drawShip(baseX, baseY, now, palette, speed) {

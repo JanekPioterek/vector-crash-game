@@ -509,15 +509,25 @@ input[type=number]{ -moz-appearance: textfield; }
 
 .bet-row{
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 12px 1fr auto auto;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--hairline);
   font-size: 12.5px;
   animation: rowIn .25s var(--ease-out);
 }
 .bet-row.is-self{ background: rgba(79,216,255,0.05); }
+
+/* small ship-icon tag matching each player's assigned fleet colour, set
+   inline via border-bottom-color per row */
+.bet-ship-icon{
+  width: 0; height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-bottom: 9px solid var(--cruise-1);
+  flex-shrink: 0;
+}
 .bet-name{ color: var(--text-primary); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bet-amount{ font-family: var(--font-mono); color: var(--text-secondary); text-align: right; }
 .bet-tag{
