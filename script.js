@@ -126,8 +126,6 @@
     settingsPopover: document.getElementById("settingsPopover"),
     reduceMotionToggle: document.getElementById("reduceMotionToggle"),
     resetBalanceBtn: document.getElementById("resetBalanceBtn"),
-    lowBalanceBanner: document.getElementById("lowBalanceBanner"),
-    lowBalanceReset: document.getElementById("lowBalanceReset"),
 
     srAnnounce: document.getElementById("srAnnounce"),
     betHint: document.getElementById("betHint"),
@@ -695,7 +693,6 @@
     renderLiveBets();
     renderHistory();
     renderBetHint();
-    renderLowBalanceBanner();
   }
 
   function renderBalance() {
@@ -703,20 +700,15 @@
   }
 
   // Inline "Insufficient balance" hint — only while the player is actually
-  // choosing a bet amount, not once one is already placed.
+  // choosing a bet amount, not once one is already placed. The broader
+  // "genuinely can't afford the minimum bet" state is communicated by the
+  // main action button itself (see renderMainButton) rather than a
+  // separate banner.
   function renderBetHint() {
     if (!el.betHint) return;
     const amount = clampBetAmount(Number(el.betAmountInput.value));
     const insufficient = state.phase === PHASE.COUNTDOWN && !state.bet && amount > state.balance;
     el.betHint.hidden = !insufficient;
-  }
-
-  // Persistent recovery banner once the player genuinely can't afford the
-  // minimum bet — separate from the transient per-keystroke hint above.
-  function renderLowBalanceBanner() {
-    if (!el.lowBalanceBanner) return;
-    const outOfFunds = state.balance < CONFIG.MIN_BET && !state.bet;
-    el.lowBalanceBanner.hidden = !outOfFunds;
   }
 
   function renderModeLabel() {
@@ -781,9 +773,17 @@
     btn.classList.remove("state-cashout", "state-success", "state-crashed");
     btn.disabled = false;
 
+    // Genuinely out of funds is folded into the button itself rather than
+    // a separate banner — one less element competing for attention, and
+    // one less thing that can go out of sync with the real balance.
+    const outOfFunds = !state.bet && state.balance < CONFIG.MIN_BET;
+
     if (state.phase === PHASE.COUNTDOWN) {
       if (state.bet) {
         label.textContent = "BET PLACED — WAITING";
+        btn.disabled = true;
+      } else if (outOfFunds) {
+        label.textContent = "OUT OF FUNDS";
         btn.disabled = true;
       } else {
         label.textContent = "PLACE BET";
@@ -792,7 +792,7 @@
       }
     } else if (state.phase === PHASE.RUNNING) {
       if (!state.bet) {
-        label.textContent = "NO ACTIVE BET";
+        label.textContent = outOfFunds ? "OUT OF FUNDS" : "NO ACTIVE BET";
         btn.disabled = true;
       } else if (state.bet.resolved) {
         label.textContent = `CASHED OUT AT ${formatMult(state.bet.cashedOutAtMultiplier)}`;
@@ -2015,9 +2015,6 @@
       if (v >= 1.01) state.autoCashoutValue = v;
     });
 
-    // Low-balance recovery (inline banner) and Settings panel's reset both
-    // call the same function.
-    el.lowBalanceReset.addEventListener("click", resetBalance);
     el.resetBalanceBtn.addEventListener("click", resetBalance);
 
     el.reduceMotionToggle.addEventListener("click", () => {
