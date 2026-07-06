@@ -26,6 +26,13 @@
   /* ------------------------------------------------------------------ */
   /* 1. Configuration                                                    */
   /* ------------------------------------------------------------------ */
+  // Feature flag: keeps the "table of ships" concept (colour-coded fleet
+  // rendered around the hero, matching leaderboard ship icons) fully built
+  // but switched off for a simpler MVP. Flip to true to re-enable — no
+  // other code needs to change; every fleet-related function below checks
+  // this flag and falls back to the plain NPC-list-only behaviour when off.
+  const FEATURE_FLEET_TABLE = false;
+
   const CONFIG = {
     STARTING_BALANCE: 1250.0,
     MIN_BET: 1,
@@ -46,11 +53,15 @@
     CASHOUT_TRAIL_FADE_MS: 1800, // how long the afterimage streak lingers once the ship is gone
     QUICK_AMOUNTS: [10, 25, 50, 100],
     HISTORY_LENGTH: 20,
-    // Table size: 3-5 opponents + the player = a table of 4-6 total,
-    // matching the "small table, visible fleet" concept rather than an
-    // anonymous scrolling list.
-    NPC_MIN: 3,
-    NPC_MAX: 5,
+    // Table size when FEATURE_FLEET_TABLE is on: 3-5 opponents + the
+    // player = 4-6 total, matching the "small table, visible fleet"
+    // concept rather than an anonymous scrolling list.
+    NPC_MIN_FLEET: 3,
+    NPC_MAX_FLEET: 5,
+    // Plain MVP list size when the fleet feature is off — the original,
+    // larger anonymous-list range.
+    NPC_MIN_MVP: 5,
+    NPC_MAX_MVP: 9,
     NPC_NAMES: [
       "Kestrel_09", "Nyx.Vega", "Halcyon", "0xDrift", "Ionis", "Mara_K",
       "Pulsegrid", "Vantablk", "Wraith77", "Sable_Q", "Toru.eth", "Cinder",
@@ -107,6 +118,20 @@
     fairResult: document.getElementById("fairResult"),
     soundToggle: document.getElementById("soundToggle"),
 
+    howToPlayBtn: document.getElementById("howToPlayBtn"),
+    howToPlayOverlay: document.getElementById("howToPlayOverlay"),
+    howToPlayClose: document.getElementById("howToPlayClose"),
+
+    settingsBtn: document.getElementById("settingsBtn"),
+    settingsPopover: document.getElementById("settingsPopover"),
+    reduceMotionToggle: document.getElementById("reduceMotionToggle"),
+    resetBalanceBtn: document.getElementById("resetBalanceBtn"),
+    lowBalanceBanner: document.getElementById("lowBalanceBanner"),
+    lowBalanceReset: document.getElementById("lowBalanceReset"),
+
+    srAnnounce: document.getElementById("srAnnounce"),
+    betHint: document.getElementById("betHint"),
+
     gameStage: document.getElementById("gameStage"),
     canvas: document.getElementById("tunnelCanvas"),
     modeLabel: document.getElementById("modeLabel"),
@@ -140,7 +165,10 @@
     historyList: document.getElementById("historyList"),
   };
 
-  const prefersReducedMotion = window.matchMedia(
+  // Mutable (not const): the Settings panel lets a player force this on
+  // independent of their OS-level preference, so every draw function that
+  // reads it keeps working unchanged when the value flips at runtime.
+  let prefersReducedMotion = window.matchMedia(
     "(prefers-reduced-motion: reduce)"
   ).matches;
 
@@ -341,10 +369,14 @@
     resolveNpcsOnCrash();
     pushHistory(state.crashPoint);
     flashCrash();
+    playSound("crash");
 
     if (state.bet && !state.bet.resolved) {
       state.bet.resolved = true;
       state.bet.lost = true;
+      announce(`Collapsed at ${formatMult(state.crashPoint)} — lost ${formatMoney(state.bet.amount)}`);
+    } else {
+      announce(`Collapsed at ${formatMult(state.crashPoint)}`);
     }
 
     renderAll();
@@ -429,6 +461,17 @@
       resolved: false,
       lost: false,
     };
+    playSound("bet");
+    announce(`Bet placed: ${formatMoney(amount)}`);
+    renderAll();
+  }
+
+  // Manual recovery path once balance runs out (or any time, via Settings)
+  // — a prototype has no deposit flow, so without this a player who loses
+  // everything has no way to keep testing the game.
+  function resetBalance() {
+    state.balance = CONFIG.STARTING_BALANCE;
+    announce(`Balance reset to ${formatMoney(CONFIG.STARTING_BALANCE)}`);
     renderAll();
   }
 
@@ -458,6 +501,8 @@
     state.cashoutTrail = { bornAt: null, x1: shipPos.x, y1: shipPos.y, x2: vp.x, y2: vp.y };
 
     el.gameStage.dataset.mode = "cashed";
+    playSound("cashout");
+    announce(`Cashed out at ${formatMult(multiplier)} for ${formatMoney(payout)}`);
     renderAll();
   }
 
@@ -485,6 +530,8 @@
 
     el.gameStage.dataset.mode = "overdrive";
     pulseOverdrive();
+    playSound("overdrive");
+    announce("Overdrive activated");
     renderAll();
   }
 
@@ -536,10 +583,15 @@
 
   function generateNpcs() {
     const rng = state._rng;
-    const count = CONFIG.NPC_MIN + Math.floor(rng() * (CONFIG.NPC_MAX - CONFIG.NPC_MIN + 1));
+    const npcMin = FEATURE_FLEET_TABLE ? CONFIG.NPC_MIN_FLEET : CONFIG.NPC_MIN_MVP;
+    const npcMax = FEATURE_FLEET_TABLE ? CONFIG.NPC_MAX_FLEET : CONFIG.NPC_MAX_MVP;
+    const count = npcMin + Math.floor(rng() * (npcMax - npcMin + 1));
     const usedNames = new Set();
     const npcs = [];
 
+    // Colour/slot assignment only matters when the fleet is actually
+    // rendered — still drawn from the round's rng either way so the
+    // sequence of subsequent rng calls doesn't shift when the flag flips.
     const colorOrder = shuffledIndices(CONFIG.FLEET_COLORS.length, rng);
     const slotOrder = shuffledIndices(FLEET_SLOTS.length, rng);
 
@@ -564,8 +616,8 @@
         status: "waiting", // waiting | cruise | overdrive | crash
         cashedAt: null,
         warpBornAt: null, // set the instant this NPC cashes out, for its own mini warp animation
-        color: CONFIG.FLEET_COLORS[colorOrder[i % colorOrder.length]],
-        slot: FLEET_SLOTS[slotOrder[i % slotOrder.length]],
+        color: FEATURE_FLEET_TABLE ? CONFIG.FLEET_COLORS[colorOrder[i % colorOrder.length]] : null,
+        slot: FEATURE_FLEET_TABLE ? FLEET_SLOTS[slotOrder[i % slotOrder.length]] : null,
       });
     }
     state.npcs = npcs;
@@ -625,6 +677,13 @@
     return `${v.toFixed(2)}x`;
   }
 
+  // Sparse, discrete-event screen-reader announcements — separate from the
+  // multiplier's own aria-live="off" region, which would otherwise spam
+  // assistive tech at the digit-roll's ~10/sec update rate.
+  function announce(message) {
+    if (el.srAnnounce) el.srAnnounce.textContent = message;
+  }
+
   function renderAll() {
     renderBalance();
     renderModeLabel();
@@ -635,10 +694,29 @@
     renderCountdownVisibility();
     renderLiveBets();
     renderHistory();
+    renderBetHint();
+    renderLowBalanceBanner();
   }
 
   function renderBalance() {
     el.balanceValue.textContent = formatMoney(state.balance);
+  }
+
+  // Inline "Insufficient balance" hint — only while the player is actually
+  // choosing a bet amount, not once one is already placed.
+  function renderBetHint() {
+    if (!el.betHint) return;
+    const amount = clampBetAmount(Number(el.betAmountInput.value));
+    const insufficient = state.phase === PHASE.COUNTDOWN && !state.bet && amount > state.balance;
+    el.betHint.hidden = !insufficient;
+  }
+
+  // Persistent recovery banner once the player genuinely can't afford the
+  // minimum bet — separate from the transient per-keystroke hint above.
+  function renderLowBalanceBanner() {
+    if (!el.lowBalanceBanner) return;
+    const outOfFunds = state.balance < CONFIG.MIN_BET && !state.bet;
+    el.lowBalanceBanner.hidden = !outOfFunds;
   }
 
   function renderModeLabel() {
@@ -795,12 +873,16 @@
   function buildBetRow(name, amount, tagCls, tagText, isSelf, color) {
     const li = document.createElement("li");
     li.className = isSelf ? "bet-row is-self" : "bet-row";
+    if (FEATURE_FLEET_TABLE) li.classList.add("has-icon");
 
-    const icon = document.createElement("span");
-    icon.className = "bet-ship-icon";
-    icon.setAttribute("aria-hidden", "true");
-    const c = color || SELF_SHIP_COLOR;
-    icon.style.borderBottomColor = `rgb(${c.r},${c.g},${c.b})`;
+    if (FEATURE_FLEET_TABLE) {
+      const icon = document.createElement("span");
+      icon.className = "bet-ship-icon";
+      icon.setAttribute("aria-hidden", "true");
+      const c = color || SELF_SHIP_COLOR;
+      icon.style.borderBottomColor = `rgb(${c.r},${c.g},${c.b})`;
+      li.appendChild(icon);
+    }
 
     const nameEl = document.createElement("span");
     nameEl.className = "bet-name";
@@ -814,7 +896,6 @@
     tagEl.className = `bet-tag ${tagCls}`;
     tagEl.textContent = tagText;
 
-    li.appendChild(icon);
     li.appendChild(nameEl);
     li.appendChild(amountEl);
     li.appendChild(tagEl);
@@ -913,6 +994,83 @@
     el.gameStage.classList.remove("pulse");
     void el.gameStage.offsetWidth;
     el.gameStage.classList.add("pulse");
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 12b. Sound — procedural, no external assets                         */
+  /* ------------------------------------------------------------------ */
+  // Every cue is synthesized on the fly with the Web Audio API (oscillators
+  // + gain envelopes) rather than loaded from audio files, matching the
+  // "no external dependencies" brief. AudioContext is created lazily on
+  // first use since browsers block audio before a user gesture; each call
+  // is a no-op if sound is off or the API isn't available.
+  let audioCtx = null;
+  function getAudioCtx() {
+    if (audioCtx) return audioCtx;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    audioCtx = new Ctx();
+    return audioCtx;
+  }
+
+  function tone(ctx, { freq, start, duration, type = "sine", gain = 0.18, glideTo = null }) {
+    const osc = ctx.createOscillator();
+    const gainNode = ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, start);
+    if (glideTo != null) osc.frequency.exponentialRampToValueAtTime(Math.max(1, glideTo), start + duration);
+    gainNode.gain.setValueAtTime(0, start);
+    gainNode.gain.linearRampToValueAtTime(gain, start + 0.012);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+    osc.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    osc.start(start);
+    osc.stop(start + duration + 0.02);
+  }
+
+  function noiseBurst(ctx, { start, duration, gain = 0.22 }) {
+    const bufferSize = Math.max(1, Math.floor(ctx.sampleRate * duration));
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize); // decaying noise
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    const gainNode = ctx.createGain();
+    gainNode.gain.setValueAtTime(gain, start);
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+    const filter = ctx.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.value = 900;
+    src.connect(filter);
+    filter.connect(gainNode);
+    gainNode.connect(ctx.destination);
+    src.start(start);
+  }
+
+  function playSound(name) {
+    if (!state.soundOn) return;
+    const ctx = getAudioCtx();
+    if (!ctx) return;
+    if (ctx.state === "suspended") ctx.resume();
+    const t = ctx.currentTime;
+
+    try {
+      if (name === "bet") {
+        tone(ctx, { freq: 520, start: t, duration: 0.09, type: "sine", gain: 0.14 });
+      } else if (name === "cashout") {
+        tone(ctx, { freq: 520, start: t, duration: 0.22, type: "triangle", gain: 0.16, glideTo: 1040 });
+        tone(ctx, { freq: 780, start: t + 0.06, duration: 0.22, type: "triangle", gain: 0.12, glideTo: 1300 });
+      } else if (name === "overdrive") {
+        tone(ctx, { freq: 180, start: t, duration: 0.35, type: "sawtooth", gain: 0.1, glideTo: 420 });
+      } else if (name === "crash") {
+        noiseBurst(ctx, { start: t, duration: 0.4, gain: 0.24 });
+        tone(ctx, { freq: 140, start: t, duration: 0.3, type: "square", gain: 0.1, glideTo: 40 });
+      }
+    } catch (err) {
+      console.error("[VECTOR] sound playback failed:", err);
+    }
   }
 
   /* ------------------------------------------------------------------ */
@@ -1519,6 +1677,7 @@
   }
 
   function drawFleet(now, ship) {
+    if (!FEATURE_FLEET_TABLE) return;
     const vp = vanishingPoint();
     for (const npc of state.npcs) {
       if (!npc.slot || !npc.color) continue;
@@ -1830,6 +1989,7 @@
       state.betAmount = isNaN(raw) ? state.betAmount : raw;
       syncChipActiveState();
       renderMainButton();
+      renderBetHint();
     });
     el.betAmountInput.addEventListener("blur", () => setBetAmount(Number(el.betAmountInput.value)));
 
@@ -1846,8 +2006,48 @@
       el.autoCashoutValue.disabled = !state.autoCashoutEnabled;
     });
     el.autoCashoutValue.addEventListener("input", () => {
-      const v = Number(el.autoCashoutValue.value);
-      if (!isNaN(v) && v >= 1.01) state.autoCashoutValue = v;
+      let v = Number(el.autoCashoutValue.value);
+      if (isNaN(v)) return;
+      // Sanity ceiling — matches the same cap the crash curve itself uses,
+      // so there's no way to set an auto-cashout target that could never
+      // possibly trigger.
+      v = Math.min(v, CONFIG.MAX_VISIBLE_MULTIPLIER);
+      if (v >= 1.01) state.autoCashoutValue = v;
+    });
+
+    // Low-balance recovery (inline banner) and Settings panel's reset both
+    // call the same function.
+    el.lowBalanceReset.addEventListener("click", resetBalance);
+    el.resetBalanceBtn.addEventListener("click", resetBalance);
+
+    el.reduceMotionToggle.addEventListener("click", () => {
+      prefersReducedMotion = !prefersReducedMotion;
+      el.reduceMotionToggle.setAttribute("aria-checked", String(prefersReducedMotion));
+      // Particle/star counts are sized once at build time based on this
+      // flag, so rebuild them immediately rather than waiting for a resize.
+      buildParticles();
+      buildStarfield();
+      buildDebris();
+    });
+
+    // Settings popover
+    el.settingsBtn.addEventListener("click", () => {
+      const willOpen = el.settingsPopover.hidden;
+      el.settingsPopover.hidden = !willOpen;
+      el.settingsBtn.setAttribute("aria-expanded", String(willOpen));
+    });
+    document.addEventListener("click", (e) => {
+      if (!el.settingsPopover.hidden && !el.settingsBtn.contains(e.target) && !el.settingsPopover.contains(e.target)) {
+        el.settingsPopover.hidden = true;
+        el.settingsBtn.setAttribute("aria-expanded", "false");
+      }
+    });
+
+    // How-to-play modal
+    el.howToPlayBtn.addEventListener("click", showHowToPlay);
+    el.howToPlayClose.addEventListener("click", hideHowToPlay);
+    el.howToPlayOverlay.addEventListener("click", (e) => {
+      if (e.target === el.howToPlayOverlay) hideHowToPlay();
     });
 
     el.mainActionBtn.addEventListener("click", () => {
@@ -1858,6 +2058,18 @@
 
     // Keyboard shortcuts (layered on top of native tab/enter/space support).
     document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        if (!el.howToPlayOverlay.hidden) hideHowToPlay();
+        if (!el.settingsPopover.hidden) {
+          el.settingsPopover.hidden = true;
+          el.settingsBtn.setAttribute("aria-expanded", "false");
+        }
+        if (!el.fairPopover.hidden) {
+          el.fairPopover.hidden = true;
+          el.fairBadge.setAttribute("aria-expanded", "false");
+        }
+        return;
+      }
       const tag = document.activeElement && document.activeElement.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       if (e.code === "Space") {
@@ -1916,6 +2128,19 @@
     el.panelHistory.hidden = liveActive;
   }
 
+  let howToPlayReturnFocus = null;
+  function showHowToPlay() {
+    howToPlayReturnFocus = document.activeElement;
+    el.howToPlayOverlay.hidden = false;
+    el.howToPlayClose.focus();
+  }
+  function hideHowToPlay() {
+    el.howToPlayOverlay.hidden = true;
+    if (howToPlayReturnFocus && typeof howToPlayReturnFocus.focus === "function") {
+      howToPlayReturnFocus.focus();
+    }
+  }
+
   /* ------------------------------------------------------------------ */
   /* 15. Boot                                                             */
   /* ------------------------------------------------------------------ */
@@ -1944,6 +2169,12 @@
     // console (e.g. `__VECTOR_DEBUG__.state.npcs.length`) without changing
     // any gameplay behaviour.
     window.__VECTOR_DEBUG__ = { state, CONFIG, el };
+
+    // First-time onboarding: Overdrive is the one genuinely novel mechanic
+    // here and nothing else in the UI explains it, so show the rules once
+    // per session. Not persisted across reloads — a prototype doesn't need
+    // storage for this, and it's harmless to see again after a refresh.
+    showHowToPlay();
   }
 
   if (document.readyState === "loading") {

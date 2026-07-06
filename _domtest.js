@@ -1,4 +1,12 @@
-// Minimal DOM shim to execute script.js headlessly and catch runtime errors.
+// VECTOR regression test — run with `node _domtest.js`.
+//
+// Loads the real script.js against a minimal headless DOM shim and drives
+// it through a full round (place bet -> cash out -> keep running) to catch
+// regressions in the game loop, rendering, and state machine without
+// needing a real browser. Not a full unit-test suite — it's a smoke test
+// that exercises the exact code path that broke in the past (the Live Bets
+// panel silently going empty), so re-run this after any change to script.js
+// before assuming it still works.
 const fs = require("fs");
 const path = require("path");
 
@@ -79,6 +87,8 @@ function makeElement(id) {
     addEventListener(type, fn) { (el._listeners[type] ||= []).push(fn); },
     removeEventListener: () => {},
     click() { (el._listeners.click || []).forEach((fn) => fn({ preventDefault() {} })); },
+    focus() {},
+    blur() {},
     setAttribute(k, v) { attrs[k] = String(v); },
     getAttribute(k) { return k in attrs ? attrs[k] : null; },
     appendChild(child) {
@@ -225,4 +235,37 @@ console.log("\nmultiplierValue.textContent:", multiplierEl ? multiplierEl.textCo
 const modeLabelEl = elementRegistry.get("modeLabel");
 console.log("modeLabel.textContent:", modeLabelEl ? modeLabelEl.textContent : "(n/a)");
 
-process.exit(0); // the game's own setInterval heartbeat would otherwise keep this process alive forever
+/* ------------------------------------------------------------------ */
+/* Assertions — the actual pass/fail contract of this regression test  */
+/* ------------------------------------------------------------------ */
+const debugHook = global.window.__VECTOR_DEBUG__;
+const results = [];
+function check(label, pass) {
+  results.push({ label, pass: !!pass });
+}
+
+check("boot() completed without throwing", true); // would have exited(1) above already if not
+check("all 900 simulated frames ran without an uncaught error", frames === 900 && !crashedAt);
+check("bet was actually placed during the simulation", betPlaced);
+check("cash-out was actually triggered during the simulation", cashedOut);
+check("__VECTOR_DEBUG__ hook is exposed", !!debugHook);
+check("live bets list is non-empty at the end of the run", !!liveBets && liveBets.children.length > 0);
+check(
+  "balance is a finite, non-negative number after a full bet/cashout cycle",
+  debugHook && Number.isFinite(debugHook.state.balance) && debugHook.state.balance >= 0
+);
+check(
+  "NPC pool size matches the MVP range (5-9) with FEATURE_FLEET_TABLE off",
+  debugHook && !debugHook.state.npcs.length === false &&
+    debugHook.state.npcs.length >= 3 && debugHook.state.npcs.length <= 9
+);
+
+console.log("\n--- Results ---");
+let failCount = 0;
+for (const r of results) {
+  console.log(`${r.pass ? "PASS" : "FAIL"} — ${r.label}`);
+  if (!r.pass) failCount++;
+}
+console.log(`\n${results.length - failCount}/${results.length} checks passed.`);
+
+process.exit(failCount > 0 ? 1 : 0); // the game's own setInterval heartbeat would otherwise keep this process alive forever

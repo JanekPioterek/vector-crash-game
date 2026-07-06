@@ -31,7 +31,7 @@
   /* text */
   --text-primary:   #eef1f5;
   --text-secondary: #9aa4b2;
-  --text-tertiary:  #616b78;
+  --text-tertiary:  #7a8490; /* brightened from #616b78 — that failed WCAG AA (3.2-3.7:1) at the small sizes (9-12.5px) it's actually used at; this clears 4.5:1 against every background it appears on */
 
   /* cruise (cyan / icy blue) */
   --cruise-1: #4fd8ff;
@@ -113,6 +113,9 @@ input[type=number]{ -moz-appearance: textfield; }
   justify-content: space-between;
   gap: 12px;
   padding: 12px 20px;
+  padding-top: max(12px, env(safe-area-inset-top));
+  padding-left: max(20px, env(safe-area-inset-left));
+  padding-right: max(20px, env(safe-area-inset-right));
   background: linear-gradient(180deg, var(--surface-1), var(--bg-base));
   border-bottom: 1px solid var(--border-soft);
   position: relative;
@@ -160,6 +163,126 @@ input[type=number]{ -moz-appearance: textfield; }
 .fair-popover dt{ font-size: 11px; color: var(--text-tertiary); }
 .fair-popover dd{ margin: 0; font-size: 11px; font-family: var(--font-mono); color: var(--text-secondary); word-break: break-all; text-align: right; }
 .fair-popover-note{ font-size: 10.5px; line-height: 1.5; color: var(--text-tertiary); margin-top: 6px; }
+
+/* "?" how-to-play trigger sits inline with the brand row */
+#howToPlayBtn{
+  width: 26px; height: 26px;
+  font-size: 13px; font-weight: 700;
+  border-radius: 50%;
+  border: 1px solid var(--border-soft);
+  background: var(--surface-2);
+  color: var(--text-secondary);
+}
+#howToPlayBtn:hover{ color: var(--text-primary); border-color: var(--border-strong); }
+
+.settings-wrap{ position: relative; }
+.settings-popover{
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  width: 240px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.5);
+  z-index: 50;
+}
+.settings-row{
+  display: flex; align-items: center; justify-content: space-between;
+  margin: 12px 0;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+.settings-reset-btn{
+  width: 100%;
+  padding: 9px 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  transition: border-color .15s, background .15s;
+}
+.settings-reset-btn:hover{ border-color: var(--border-strong); background: var(--surface-2); }
+
+/* ---------------------------------------------------------------------- */
+/* How-to-play modal                                                      */
+/* ---------------------------------------------------------------------- */
+.modal-overlay{
+  position: fixed; inset: 0;
+  background: rgba(2,4,7,0.72);
+  backdrop-filter: blur(3px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+  z-index: 300;
+}
+.modal-overlay[hidden]{ display: none; }
+.modal-card{
+  width: min(440px, 100%);
+  background: linear-gradient(180deg, var(--surface-2), var(--surface-1));
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  box-shadow: 0 24px 60px rgba(0,0,0,0.6);
+}
+.modal-card h2{ font-size: 17px; font-weight: 700; letter-spacing: 0.02em; margin: 0 0 12px; color: var(--text-primary); }
+.modal-card p{ font-size: 13px; line-height: 1.6; color: var(--text-secondary); margin: 0 0 12px; }
+.modal-card strong{ color: var(--cruise-1); font-weight: 700; }
+.modal-disclaimer{ font-size: 11px; color: var(--text-tertiary); border-top: 1px solid var(--border-soft); padding-top: 12px; }
+.modal-card .btn{ width: 100%; margin-top: 4px; }
+kbd{
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Insufficient balance / low balance                                     */
+/* ---------------------------------------------------------------------- */
+.field-hint{
+  font-size: 11px;
+  color: var(--crash-1);
+  margin: 6px 2px 0;
+}
+.low-balance-banner{
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-top: 12px;
+  border: 1px solid rgba(255,84,104,0.35);
+  background: rgba(255,84,104,0.08);
+  border-radius: var(--radius-md);
+  font-size: 12.5px;
+  color: var(--text-primary);
+}
+.low-balance-banner button{
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255,84,104,0.4);
+  background: var(--crash-1);
+  color: #2a0509;
+  font-weight: 700;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Footer                                                                  */
+/* ---------------------------------------------------------------------- */
+.app-footer{
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  padding: 6px 16px 18px;
+  padding-bottom: max(18px, env(safe-area-inset-bottom));
+}
 
 .header-right{ display: flex; align-items: center; gap: 10px; }
 .balance{
@@ -509,15 +632,19 @@ input[type=number]{ -moz-appearance: textfield; }
 
 .bet-row{
   display: grid;
-  grid-template-columns: 12px 1fr auto auto;
+  grid-template-columns: 1fr auto auto;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--hairline);
   font-size: 12.5px;
   animation: rowIn .25s var(--ease-out);
 }
 .bet-row.is-self{ background: rgba(79,216,255,0.05); }
+
+/* FEATURE_FLEET_TABLE only: adds the ship-icon column. Plain MVP rows
+   stay 3-column (name / amount / tag) with no icon markup at all. */
+.bet-row.has-icon{ grid-template-columns: 12px 1fr auto auto; gap: 9px; }
 
 /* small ship-icon tag matching each player's assigned fleet colour, set
    inline via border-bottom-color per row */
@@ -664,7 +791,12 @@ input[type=number]{ -moz-appearance: textfield; }
 }
 
 @media (max-width: 640px){
-  .app-header{ padding: 10px 12px; }
+  .app-header{
+    padding: 10px 12px;
+    padding-top: max(10px, env(safe-area-inset-top));
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+  }
   .brand-name{ font-size: 15px; letter-spacing: 0.14em; }
   .fair-badge{ display: none; }
   .balance-value{ font-size: 13px; }
@@ -674,9 +806,21 @@ input[type=number]{ -moz-appearance: textfield; }
   .multiplier{ font-size: clamp(36px, 13vw, 56px); }
 
   .bet-controls{ grid-template-columns: 1fr; gap: 10px; }
-  .betting-panel{ padding: 12px; gap: 10px; }
+  .betting-panel{
+    padding: 12px;
+    padding-bottom: max(12px, env(safe-area-inset-bottom));
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+    gap: 10px;
+  }
   .action-row{ grid-template-columns: 1fr 1.3fr; gap: 8px; }
-  .btn{ padding: 14px 10px; font-size: 12.5px; }
+  .btn{ padding: 14px 10px; font-size: 12.5px; min-height: 44px; }
+
+  /* touch target minimum ~44px per platform guidelines */
+  .stepper-btn{ width: 44px; min-height: 44px; }
+  .amount-input-wrap{ min-height: 44px; }
+  .chip{ min-height: 44px; display: flex; align-items: center; justify-content: center; }
+  .icon-btn{ width: 40px; height: 40px; }
 
   .side-panel{
     order: 3;
