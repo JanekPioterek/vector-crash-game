@@ -406,9 +406,8 @@
         } else {
           state.currentMultiplier = m;
           checkAutoCashout();
-          updateNpcs(m);
+          updateNpcs(m); // calls renderLiveBets() itself, but only when an NPC's status actually changes
           renderMultiplier();
-          renderLiveBets();
         }
       } else if (state.phase === PHASE.RESULT) {
         if (now >= state.resultEndTime) endResultPhase();
@@ -419,15 +418,18 @@
       console.error("[VECTOR] frame error (loop continues):", err);
     }
 
-    // Belt-and-suspenders: attempt the live bets render unconditionally,
-    // every frame, regardless of phase or whatever happened above. Its own
-    // internals are already individually guarded (see renderLiveBets).
-    try {
-      renderLiveBets();
-    } catch (err) {
-      console.error("[VECTOR] live bets render failed:", err);
-    }
-
+    // Deliberately NOT calling renderLiveBets() unconditionally here. It
+    // used to be called every single frame (both originally, inside the
+    // RUNNING branch above, and again here as an extra "safety" measure) —
+    // but .bet-row plays a 250ms entrance animation, and rebuilding the
+    // list every ~16ms means every row is a brand-new DOM node before its
+    // previous instance ever finished fading in. CSS animations restart
+    // from zero on a new node, so the rows were perpetually destroyed and
+    // recreated mid-fade, stuck near-invisible — with no thrown error,
+    // since nothing was actually broken from JS's point of view. This is
+    // the real cause of the "Live Bets panel is empty" reports: it only
+    // needs to re-render on actual state changes (see updateNpcs, and the
+    // renderAll() calls around bets/cashouts/rounds), not every frame.
     animRafId = requestAnimationFrame(tick);
   }
 

@@ -616,7 +616,12 @@ kbd{
   padding: 10px 14px;
   border-bottom: 1px solid var(--hairline);
   font-size: 12.5px;
-  animation: rowIn .25s var(--ease-out);
+  /* Deliberately no entrance animation here (see the comment above
+     tick() in script.js): this list is fully rebuilt from scratch on
+     every state change, and animating opacity-from-0 on brand-new nodes
+     caused rows to render as permanently near-invisible when rebuilds
+     happened faster than the animation could complete. Rows now appear
+     at full opacity immediately — reliability over a flourish. */
 }
 .bet-row.is-self{ background: rgba(79,216,255,0.05); }
 
@@ -655,7 +660,6 @@ kbd{
   padding: 10px 14px;
   border-bottom: 1px solid var(--hairline);
   font-size: 12.5px;
-  animation: rowIn .25s var(--ease-out);
 }
 .history-chip{
   font-family: var(--font-mono);
@@ -670,11 +674,6 @@ kbd{
 .history-chip.tier-high{ color: var(--overdrive-2); border-color: rgba(255,79,216,0.3); background: rgba(255,79,216,0.06); }
 .history-chip.tier-extreme{ color: var(--success-2); border-color: rgba(255,215,94,0.4); background: rgba(255,215,94,0.08); }
 .history-time{ color: var(--text-tertiary); font-size: 11px; }
-
-@keyframes rowIn{
-  from{ opacity: 0; transform: translateY(-4px); }
-  to{ opacity: 1; transform: translateY(0); }
-}
 
 .empty-row{ padding: 24px 14px; text-align: center; color: var(--text-tertiary); font-size: 12px; }
 
