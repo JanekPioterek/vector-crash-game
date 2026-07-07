@@ -2457,15 +2457,18 @@
       state.autoCashoutEnabled = !state.autoCashoutEnabled;
       el.autoCashoutToggle.setAttribute("aria-checked", String(state.autoCashoutEnabled));
       el.autoCashoutValue.disabled = !state.autoCashoutEnabled;
-      // While off, the field shows its placeholder rather than a leftover
-      // typed value — a blank, disabled-looking field reads as genuinely
-      // off; a filled one reads as still armed. The real target stays in
-      // state.autoCashoutValue regardless, so nothing is lost by clearing
-      // the visible value here.
+      // While off, the field shows nothing at all — no value, no example
+      // number placeholder either. A dimmed "2.00" still reads as a live
+      // number at a glance (same digits, same position as the real value);
+      // a genuinely empty box is the only version that unambiguously reads
+      // as "off". The real target stays in state.autoCashoutValue
+      // regardless, so nothing is lost by clearing the visible field here.
       if (state.autoCashoutEnabled) {
         el.autoCashoutValue.value = state.autoCashoutValue.toFixed(2);
+        el.autoCashoutValue.placeholder = "2.00";
       } else {
         el.autoCashoutValue.value = "";
+        el.autoCashoutValue.placeholder = "";
       }
       renderAutoPill();
     });
@@ -2698,6 +2701,15 @@
     resizeCanvas();
     wireInputs();
     syncChipActiveState();
+    // Sync the auto-cashout field's visible state to state.autoCashoutEnabled
+    // right away, rather than waiting for the first toggle click — the
+    // static HTML ships with no placeholder/value at all (matches the
+    // default: disabled), but this keeps boot() as the single source of
+    // truth if that default ever changes.
+    if (el.autoCashoutValue) {
+      el.autoCashoutValue.placeholder = state.autoCashoutEnabled ? "2.00" : "";
+      el.autoCashoutValue.value = state.autoCashoutEnabled ? state.autoCashoutValue.toFixed(2) : "";
+    }
     startCountdown();
     lastFrameTime = performance.now();
     animRafId = requestAnimationFrame(tick);
