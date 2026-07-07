@@ -63,6 +63,12 @@
     FLIGHT_WARP_DELAY: 2.72, // seconds; the asymptotic "extra time" borrowed from later in the flight
     FLIGHT_WARP_DECAY: 3.0, // seconds; how quickly the warp eases back out to full speed
     SPEED_RAMP_SECONDS: 2.4, // visual tunnel speed eases in over this many seconds after launch
+    // Pure cosmetic multiplier on currentSpeedFactor()'s output (tunnel
+    // drift, nebula/debris motion, engine glow pulse, vignette) — scales
+    // how fast the flight FEELS across every phase uniformly. Does not
+    // touch GROWTH_RATE, the flight-pacing warp, state.currentMultiplier,
+    // state.crashPoint, or any timing the round loop/settlement relies on.
+    VISUAL_SPEED_MULTIPLIER: 1.5,
     MAX_VISIBLE_MULTIPLIER: 1000,
     TRAIL_BASE_LEN: 22, // px, contrail length at round start
     TRAIL_RATE: 30, // px/sec, contrail growth rate
@@ -1926,6 +1932,7 @@
     // but there's no hard plateau) so the tunnel keeps visibly accelerating
     // all the way through high multipliers instead of feeling the same
     // from 10x to 100x.
+    let raw;
     if (state.phase === PHASE.RUNNING) {
       // Speed eases in over the first couple of seconds rather than
       // snapping straight to full speed the instant the round launches.
@@ -1933,10 +1940,18 @@
       const rampIn = Math.min(1, elapsed / CONFIG.SPEED_RAMP_SECONDS);
       const base = 0.5 + 0.5 * rampIn;
       const growth = Math.log(Math.max(1, state.currentMultiplier)) * 0.42;
-      return base + growth;
+      raw = base + growth;
+    } else if (state.phase === PHASE.RESULT) {
+      raw = 0.15;
+    } else {
+      raw = 0.35; // countdown idle drift
     }
-    if (state.phase === PHASE.RESULT) return 0.15;
-    return 0.35; // countdown idle drift
+    // Single, uniform "feel faster" knob (CONFIG.VISUAL_SPEED_MULTIPLIER) —
+    // scales every phase's speed proportionally. Purely cosmetic: this
+    // value only ever feeds dt-based visual motion (tunnel drift, nebula/
+    // debris drift, engine glow, vignette) — never the multiplier curve,
+    // the crash point, or anything the round loop/settlement reads.
+    return raw * CONFIG.VISUAL_SPEED_MULTIPLIER;
   }
 
   function currentPalette() {
