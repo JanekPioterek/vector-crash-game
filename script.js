@@ -11,13 +11,12 @@
      6.  Round loop (state machine)
      7.  Betting logic
      8.  Cashout logic
-     9.  Overdrive logic
-     10. Fake live bets (NPCs)
-     11. History
-     12. UI rendering
-     13. Tunnel / pod canvas animation
-     14. Input wiring
-     15. Boot
+     9.  Fake live bets (NPCs)
+     10. History
+     11. UI rendering
+     12. Tunnel / pod canvas animation
+     13. Input wiring
+     14. Boot
    ========================================================================== */
 
 (function () {
@@ -40,13 +39,11 @@
     HOUSE_EDGE: 0.04, // placeholder house edge, drives instant-crash probability
     COUNTDOWN_SECONDS: 3.0,
     RESULT_DISPLAY_SECONDS: 2.6,
-    CRUISE_RATE: 0.1, // exponential growth constant, cruise mode (per second) — slower overall climb
+    GROWTH_RATE: 0.1, // exponential growth constant for the multiplier (per second)
     SPEED_RAMP_SECONDS: 2.4, // visual tunnel speed eases in over this many seconds after launch
-    OVERDRIVE_RATE: 0.46, // exponential growth constant, overdrive mode (per second)
     MAX_VISIBLE_MULTIPLIER: 1000,
     TRAIL_BASE_LEN: 22, // px, contrail length at round start
-    TRAIL_RATE_CRUISE: 30, // px/sec, contrail growth in cruise
-    TRAIL_RATE_OVERDRIVE: 68, // px/sec, contrail growth in overdrive
+    TRAIL_RATE: 30, // px/sec, contrail growth rate
     TRAIL_MAX_LEN: 210, // px, visual cap so the contrail never overruns the frame
     STORM_THRESHOLD_MULTIPLIER: 10, // energy-storm flickers only appear past this multiplier
     CASHOUT_WARP_MS: 680, // duration of the ship's jump-to-lightspeed departure on cashout
@@ -69,9 +66,9 @@
     ],
     // Identity colours for opponent ships/leaderboard icons. Deliberately
     // desaturated ("squadron badge" rather than rainbow) and kept clear of
-    // the player's own functional colours (cyan cruise, violet-magenta
-    // overdrive, gold-green success, red crash) so an opponent's identity
-    // colour is never mistaken for a state change on the player's own ship.
+    // the player's own functional colours (cyan cruise, gold-green success,
+    // red crash) so an opponent's identity colour is never mistaken for a
+    // state change on the player's own ship.
     FLEET_COLORS: [
       { r: 255, g: 198, b: 92 },  // solar gold
       { r: 77, g: 217, b: 168 },  // emerald
@@ -101,11 +98,6 @@
     RESULT: "result",
   };
 
-  const MODE = {
-    CRUISE: "cruise",
-    OVERDRIVE: "overdrive",
-  };
-
   /* ------------------------------------------------------------------ */
   /* 2. DOM references                                                   */
   /* ------------------------------------------------------------------ */
@@ -115,6 +107,8 @@
     fairPopover: document.getElementById("fairPopover"),
     fairRound: document.getElementById("fairRound"),
     fairSeed: document.getElementById("fairSeed"),
+    fairSeedRevealed: document.getElementById("fairSeedRevealed"),
+    fairEdge: document.getElementById("fairEdge"),
     fairResult: document.getElementById("fairResult"),
     soundToggle: document.getElementById("soundToggle"),
 
@@ -126,6 +120,12 @@
     settingsPopover: document.getElementById("settingsPopover"),
     reduceMotionToggle: document.getElementById("reduceMotionToggle"),
     resetBalanceBtn: document.getElementById("resetBalanceBtn"),
+    guardrailToggle: document.getElementById("guardrailToggle"),
+    guardrailThresholdRow: document.getElementById("guardrailThresholdRow"),
+    guardrailThresholdInput: document.getElementById("guardrailThresholdInput"),
+    guardrailOverlay: document.getElementById("guardrailOverlay"),
+    guardrailMessage: document.getElementById("guardrailMessage"),
+    guardrailDismiss: document.getElementById("guardrailDismiss"),
 
     srAnnounce: document.getElementById("srAnnounce"),
     betHint: document.getElementById("betHint"),
@@ -135,9 +135,12 @@
     modeLabel: document.getElementById("modeLabel"),
     multiplierValue: document.getElementById("multiplierValue"),
     resultBanner: document.getElementById("resultBanner"),
+    autoPill: document.getElementById("autoPill"),
     countdownWrap: document.getElementById("countdownWrap"),
     countdownText: document.getElementById("countdownText"),
+    countdownBarFill: document.getElementById("countdownBarFill"),
     crashFlash: document.getElementById("crashFlash"),
+    recentRounds: document.getElementById("recentRounds"),
 
     betAmountInput: document.getElementById("betAmountInput"),
     betDecrease: document.getElementById("betDecrease"),
@@ -147,8 +150,8 @@
     autoCashoutToggle: document.getElementById("autoCashoutToggle"),
     autoCashoutValue: document.getElementById("autoCashoutValue"),
 
-    overdriveBtn: document.getElementById("overdriveBtn"),
-    overdriveBtnLabel: document.getElementById("overdriveBtnLabel"),
+    actionRow: document.getElementById("actionRow"),
+    partialCashoutBtn: document.getElementById("partialCashoutBtn"),
     mainActionBtn: document.getElementById("mainActionBtn"),
     mainActionLabel: document.getElementById("mainActionLabel"),
 
@@ -161,6 +164,7 @@
     panelHistory: document.getElementById("panelHistory"),
     liveBetsList: document.getElementById("liveBetsList"),
     historyList: document.getElementById("historyList"),
+    sessionStats: document.getElementById("sessionStats"),
   };
 
   // Mutable (not const): the Settings panel lets a player force this on
@@ -177,23 +181,40 @@
     balance: CONFIG.STARTING_BALANCE,
     roundId: 0,
     phase: PHASE.COUNTDOWN,
-    mode: MODE.CRUISE,
 
     crashPoint: null,
     seedHash: null,
+    seed: null, // raw seed, revealed in the fair popover once the round resolves
 
     roundStartTime: null, // ms, performance.now() at moment round begins
-    overdriveElapsedAtActivation: null, // seconds elapsed in round at activation
-    overdriveActive: false,
 
     currentMultiplier: 1.0,
     countdownEndTime: null,
     resultEndTime: null,
 
-    bet: null, // { amount, cashedOutAtMultiplier, mode, resolved }
+    // { amount, remainingAmount, partials, cashedOutAtMultiplier, resolved, lost, finalNet }
+    // `amount` is the original stake and never changes after commitBet;
+    // `remainingAmount` is what's still actually at risk, and is what every
+    // payout/crash/auto-cashout calculation operates on — it only differs
+    // from `amount` once a partial cash-out has been taken.
+    bet: null,
+    queuedBet: null, // dollar amount queued mid-round, auto-placed when the next round's betting opens
     betAmount: 10,
     autoCashoutEnabled: false,
     autoCashoutValue: 2.0,
+    milestoneIdx: 0, // next entry of MILESTONES to pip at while a live bet is flying
+
+    // Session ledger — a responsible-gambling trust feature: the player can
+    // always see exactly what they've staked and where they stand, win or
+    // lose, without digging through history rows.
+    session: { rounds: 0, wagered: 0, net: 0 },
+
+    // Opt-in, front-end-only responsible-gambling reminder. `pending` is set
+    // the instant the threshold is crossed but the modal itself is deferred
+    // to the next startCountdown() — a calm moment between rounds — so it
+    // never interrupts an in-flight round or steps on a win/loss beat.
+    // `triggered` fires the reminder at most once per session.
+    guardrail: { enabled: false, threshold: 100, triggered: false, pending: false },
 
     npcs: [],
     history: [],
@@ -223,7 +244,7 @@
   /* ------------------------------------------------------------------ */
   // Mulberry32 — small, fast, deterministic PRNG. Seeded fresh each round so
   // the crash point is fully determined before the round starts and cannot
-  // be influenced by any in-round player action (Overdrive included).
+  // be influenced by any in-round player action.
   function createRng(seed) {
     let t = seed >>> 0;
     return function () {
@@ -243,10 +264,34 @@
   }
 
   function fakeHash(seed) {
-    // Cosmetic only — represents a "committed" server seed hash shown in the
-    // Provably Fair popover before the round result is known.
+    // Fallback only, used when the Web Crypto API isn't available (very old
+    // browsers, or a non-secure context where crypto.subtle is withheld).
+    // Cosmetic — not a real digest, just visually hash-shaped.
     const s = seed.toString(16).padStart(8, "0");
     return `0x${s}${s.split("").reverse().join("")}`.slice(0, 24) + "…";
+  }
+
+  // Real SHA-256 commit for the round's seed via the Web Crypto API. This is
+  // an actual cryptographic digest, not a cosmetic stand-in: a player who
+  // doesn't trust the client can take the raw seed revealed after the round
+  // resolves, hash it themselves (SHA-256 of the seed's decimal string), and
+  // confirm it matches what was shown here *before* the round started. What
+  // this still doesn't provide — because there's no backend in this
+  // prototype — is a hash published somewhere the client itself can't have
+  // silently swapped after the fact; see the fair-popover note and
+  // VECTOR_FABLE_REVIEW.md for the honest distinction.
+  async function computeSeedHash(seed) {
+    try {
+      const subtle = window.crypto && window.crypto.subtle;
+      if (!subtle) return fakeHash(seed);
+      const data = new TextEncoder().encode(String(seed));
+      const digest = await subtle.digest("SHA-256", data);
+      const bytes = Array.from(new Uint8Array(digest));
+      return "0x" + bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+    } catch (err) {
+      console.error("[VECTOR] SHA-256 commit failed, falling back:", err);
+      return fakeHash(seed);
+    }
   }
 
   // Standard crash-curve distribution: a house-edge chunk forces frequent
@@ -266,7 +311,17 @@
     const seed = makeSeed(state.roundId);
     const rng = createRng(seed);
     state.crashPoint = generateCrashPoint(rng, CONFIG.HOUSE_EDGE);
-    state.seedHash = fakeHash(seed);
+    state.seed = seed;
+    // Real SHA-256 is async; show a neutral placeholder for the handful of
+    // milliseconds before it resolves (a 3s countdown makes this a non-issue
+    // in practice), and refresh the popover in place if it's already open.
+    const thisRoundId = state.roundId;
+    state.seedHash = "committing…";
+    computeSeedHash(seed).then((hash) => {
+      if (state.roundId !== thisRoundId) return; // stale — a newer round already started
+      state.seedHash = hash;
+      if (el.fairPopover && !el.fairPopover.hidden) el.fairSeed.textContent = hash;
+    });
     // Reserve extra rng draws for NPC planned-cashout generation so NPC
     // behaviour is also pre-determined and independent of the crash point.
     state._rng = rng;
@@ -301,32 +356,19 @@
   /* ------------------------------------------------------------------ */
   /* 5. Multiplier calculation                                           */
   /* ------------------------------------------------------------------ */
-  // multiplier(t) is a continuous piecewise-exponential curve. Overdrive
-  // changes the growth *rate* from the moment of activation onward while
-  // preserving continuity (no jump) — it never touches state.crashPoint.
+  // multiplier(t) is a continuous exponential curve — it never touches
+  // state.crashPoint, which is generated and locked in before the round
+  // starts and cannot be influenced by anything the player does in-round.
   function computeMultiplier(nowMs) {
     const t = (nowMs - state.roundStartTime) / 1000;
-    if (!state.overdriveActive) {
-      return Math.exp(CONFIG.CRUISE_RATE * t);
-    }
-    const t0 = state.overdriveElapsedAtActivation;
-    const m0 = Math.exp(CONFIG.CRUISE_RATE * t0);
-    return m0 * Math.exp(CONFIG.OVERDRIVE_RATE * (t - t0));
+    return Math.exp(CONFIG.GROWTH_RATE * t);
   }
 
-  // Contrail length follows the same piecewise growth shape as the
-  // multiplier (linear here, exponential there) so the trail visibly
-  // lengthens in step with the run, then kicks harder once Overdrive hits.
+  // Contrail length grows linearly with elapsed flight time, in step with
+  // the multiplier's own growth.
   function computeTrailLength(nowMs) {
     const t = (nowMs - state.roundStartTime) / 1000;
-    let len;
-    if (!state.overdriveActive) {
-      len = CONFIG.TRAIL_BASE_LEN + CONFIG.TRAIL_RATE_CRUISE * t;
-    } else {
-      const t0 = state.overdriveElapsedAtActivation;
-      const lenAtT0 = CONFIG.TRAIL_BASE_LEN + CONFIG.TRAIL_RATE_CRUISE * t0;
-      len = lenAtT0 + CONFIG.TRAIL_RATE_OVERDRIVE * (t - t0);
-    }
+    const len = CONFIG.TRAIL_BASE_LEN + CONFIG.TRAIL_RATE * t;
     return Math.min(CONFIG.TRAIL_MAX_LEN, len);
   }
 
@@ -334,10 +376,14 @@
   /* 6. Round loop (state machine)                                       */
   /* ------------------------------------------------------------------ */
   function startCountdown() {
+    // The one safe, idle moment to surface the opt-in loss reminder — never
+    // mid-flight, never stepping on a fresh win/loss result. See checkGuardrail.
+    if (state.guardrail.pending) {
+      state.guardrail.pending = false;
+      showGuardrailReminder();
+    }
+
     state.phase = PHASE.COUNTDOWN;
-    state.mode = MODE.CRUISE;
-    state.overdriveActive = false;
-    state.overdriveElapsedAtActivation = null;
     state.currentMultiplier = 1.0;
     state.bet = null;
     state.cashoutWarp = null;
@@ -347,6 +393,20 @@
     generateRound();
     generateNpcs();
 
+    // A bet queued during the previous round converts into a real bet the
+    // moment betting opens — re-validated against the live balance, since
+    // it may have changed since the bet was queued.
+    if (state.queuedBet != null) {
+      const amount = clampBetAmount(state.queuedBet);
+      state.queuedBet = null;
+      if (amount <= state.balance) {
+        commitBet(amount);
+        announce(`Queued bet placed: ${formatMoney(amount)}`);
+      } else {
+        announce("Queued bet cancelled — insufficient balance");
+      }
+    }
+
     el.gameStage.dataset.mode = "cruise";
     renderAll();
   }
@@ -354,6 +414,7 @@
   function beginRound() {
     state.phase = PHASE.RUNNING;
     state.roundStartTime = performance.now();
+    state.milestoneIdx = 0;
     renderAll();
   }
 
@@ -365,17 +426,27 @@
     el.gameStage.dataset.mode = "crashed";
 
     resolveNpcsOnCrash();
-    pushHistory(state.crashPoint);
-    flashCrash();
-    playSound("crash");
 
     if (state.bet && !state.bet.resolved) {
       state.bet.resolved = true;
       state.bet.lost = true;
-      announce(`Collapsed at ${formatMult(state.crashPoint)} — lost ${formatMoney(state.bet.amount)}`);
+      // Only the portion still at risk is lost — any partial cash-out taken
+      // earlier already left the building and stays banked in the balance.
+      const lostAmount = state.bet.remainingAmount;
+      state.session.net -= lostAmount;
+      const partialsPayout = state.bet.partials.reduce((sum, p) => sum + p.payout, 0);
+      state.bet.finalNet = partialsPayout - state.bet.amount;
+      announce(`Collapsed at ${formatMult(state.crashPoint)} — lost ${formatMoney(lostAmount)}`);
+      checkGuardrail();
     } else {
       announce(`Collapsed at ${formatMult(state.crashPoint)}`);
     }
+
+    // Pushed after the bet is fully resolved so history/finalNet reflects
+    // the complete outcome, including any partial cash-out already banked.
+    pushHistory(state.crashPoint);
+    flashCrash();
+    playSound("crash");
 
     renderAll();
   }
@@ -401,11 +472,27 @@
         if (remaining <= 0) beginRound();
       } else if (state.phase === PHASE.RUNNING) {
         const m = computeMultiplier(now);
+        // Auto-cashout settles at EXACTLY its target multiplier, and is
+        // checked before the crash check on purpose: if the target sits
+        // below the crash point it must pay, even when a single frame's
+        // multiplier jump crosses both values at once (very possible at
+        // high multipliers, where one 16ms frame can jump 0.1x+). The old
+        // frame-based check both overpaid (whatever the frame happened to
+        // land on) and could unfairly lose that race entirely.
+        if (
+          state.autoCashoutEnabled &&
+          state.bet && !state.bet.resolved &&
+          state.autoCashoutValue <= m &&
+          state.autoCashoutValue < state.crashPoint
+        ) {
+          state.currentMultiplier = state.autoCashoutValue;
+          cashOut(true);
+        }
         if (m >= state.crashPoint) {
           triggerCrash(now);
         } else {
           state.currentMultiplier = m;
-          checkAutoCashout();
+          checkMilestones(m);
           updateNpcs(m); // calls renderLiveBets() itself, but only when an NPC's status actually changes
           renderMultiplier();
         }
@@ -447,23 +534,53 @@
     syncChipActiveState();
   }
 
+  // Shared bet commitment — used both by a direct PLACE BET during the
+  // countdown and by queued-bet conversion at the top of a new round.
+  function commitBet(amount) {
+    state.balance -= amount;
+    state.bet = {
+      amount,
+      remainingAmount: amount, // what's still actually at risk; shrinks on a partial cash-out
+      partials: [], // { atMultiplier, amount, payout } — at most one entry in this MVP
+      cashedOutAtMultiplier: null,
+      resolved: false,
+      lost: false,
+      finalNet: null, // set once resolved (cashOut or triggerCrash); banner/history read this directly
+    };
+    state.session.rounds += 1;
+    state.session.wagered += amount;
+    playSound("bet");
+  }
+
   function placeBet() {
     if (state.phase !== PHASE.COUNTDOWN) return;
     if (state.bet) return;
     const amount = clampBetAmount(Number(el.betAmountInput.value));
     if (amount > state.balance) return;
 
-    state.balance -= amount;
-    state.bet = {
-      amount,
-      cashedOutAtMultiplier: null,
-      mode: MODE.CRUISE,
-      resolved: false,
-      lost: false,
-    };
-    playSound("bet");
+    commitBet(amount);
     announce(`Bet placed: ${formatMoney(amount)}`);
     renderAll();
+  }
+
+  // Queue-a-bet: while a round is already in flight (or just resolved), a
+  // player without an active bet can commit to entering the next round
+  // instead of sitting through dead time with a disabled button. The amount
+  // is locked at queue time; tapping again cancels — nothing is deducted
+  // until the bet actually converts at the next countdown.
+  function toggleQueuedBet() {
+    if (state.queuedBet != null) {
+      state.queuedBet = null;
+      announce("Queued bet cancelled");
+    } else {
+      const amount = clampBetAmount(Number(el.betAmountInput.value));
+      if (amount > state.balance) return;
+      state.queuedBet = amount;
+      playSound("bet");
+      announce(`Bet queued for next round: ${formatMoney(amount)}`);
+    }
+    renderMainButton();
+    renderBetHint();
   }
 
   // Manual recovery path once balance runs out (or any time, via Settings)
@@ -471,6 +588,12 @@
   // everything has no way to keep testing the game.
   function resetBalance() {
     state.balance = CONFIG.STARTING_BALANCE;
+    // A fresh bankroll gets a fresh ledger — session P/L against a balance
+    // that just teleported back to the start would be meaningless.
+    state.session = { rounds: 0, wagered: 0, net: 0 };
+    // A new session gets a fresh shot at the reminder too, if it's enabled.
+    state.guardrail.triggered = false;
+    state.guardrail.pending = false;
     announce(`Balance reset to ${formatMoney(CONFIG.STARTING_BALANCE)}`);
     renderAll();
   }
@@ -478,17 +601,24 @@
   /* ------------------------------------------------------------------ */
   /* 8. Cashout logic                                                    */
   /* ------------------------------------------------------------------ */
-  function cashOut() {
+  function cashOut(isAuto) {
     if (state.phase !== PHASE.RUNNING) return;
     if (!state.bet || state.bet.resolved) return;
 
     const multiplier = state.currentMultiplier;
     state.bet.cashedOutAtMultiplier = multiplier;
-    state.bet.mode = state.mode;
     state.bet.resolved = true;
 
-    const payout = state.bet.amount * multiplier;
+    // Only the portion still at risk settles here — any partial cash-out
+    // already banked its own payout earlier and isn't touched again.
+    const stake = state.bet.remainingAmount;
+    const payout = stake * multiplier;
+    const legNet = payout - stake;
     state.balance += payout;
+    state.session.net += legNet;
+
+    const partialsPayout = state.bet.partials.reduce((sum, p) => sum + p.payout, 0);
+    state.bet.finalNet = partialsPayout + payout - state.bet.amount;
 
     // Jump-to-lightspeed departure: the ship rockets forward into the
     // vanishing point and vanishes over CONFIG.CASHOUT_WARP_MS. Purely
@@ -502,41 +632,89 @@
 
     el.gameStage.dataset.mode = "cashed";
     playSound("cashout");
-    announce(`Cashed out at ${formatMult(multiplier)} for ${formatMoney(payout)}`);
+    announce(`${isAuto ? "Auto cashed" : "Cashed"} out at ${formatMult(multiplier)} — net win +${formatMoney(state.bet.finalNet)}`);
+    checkGuardrail();
     renderAll();
   }
 
-  function checkAutoCashout() {
-    if (!state.autoCashoutEnabled) return;
+  // Partial cash-out ("Bank Half"): one decision, no new mode. Banks half of
+  // whatever is still at risk at the current multiplier straight into the
+  // balance; the other half keeps flying under the exact same rules as
+  // before (can still hit auto-cashout, manual cash-out, or the crash).
+  // Capped at one partial per bet — deliberately not a repeatable ladder —
+  // so it stays a single moment of tension release, not a new sub-system.
+  function partialCashOut() {
+    if (state.phase !== PHASE.RUNNING) return;
     if (!state.bet || state.bet.resolved) return;
-    if (state.currentMultiplier >= state.autoCashoutValue) {
-      cashOut();
+    if (state.bet.partials.length > 0) return;
+
+    const multiplier = state.currentMultiplier;
+    const stake = state.bet.remainingAmount;
+    const portion = Math.round((stake / 2) * 100) / 100;
+    const payout = portion * multiplier;
+
+    state.bet.remainingAmount = Math.round((stake - portion) * 100) / 100;
+    state.bet.partials.push({ atMultiplier: multiplier, amount: portion, payout });
+    state.balance += payout;
+    state.session.net += payout - portion;
+
+    playSound("cashout");
+    announce(`Banked ${formatMoney(payout)} at ${formatMult(multiplier)} — ${formatMoney(state.bet.remainingAmount)} still flying`);
+    checkGuardrail();
+    renderBalance();
+    renderMainButton();
+    renderPartialButton();
+    renderLiveBets();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* 8b. Session loss-reminder guardrail (opt-in, front-end only)         */
+  /* ------------------------------------------------------------------ */
+  // Deliberately minimal: one threshold, one reminder, shown at most once
+  // per session, always deferred to the next countdown (see startCountdown)
+  // so it never interrupts a round in progress. Off by default; the player
+  // opts in and sets their own number in Settings.
+  function checkGuardrail() {
+    const g = state.guardrail;
+    if (!g.enabled || g.triggered || g.pending) return;
+    if (state.session.net <= -Math.abs(g.threshold)) {
+      g.triggered = true;
+      g.pending = true;
     }
   }
 
-  /* ------------------------------------------------------------------ */
-  /* 9. Overdrive logic                                                  */
-  /* ------------------------------------------------------------------ */
-  function activateOverdrive() {
-    if (state.phase !== PHASE.RUNNING) return;
-    if (state.overdriveActive) return;
+  let guardrailReturnFocus = null;
+  function showGuardrailReminder() {
+    if (!el.guardrailOverlay) return;
+    el.guardrailMessage.textContent = `You're down ${formatMoney(Math.abs(state.session.net))} this session.`;
+    guardrailReturnFocus = document.activeElement;
+    el.guardrailOverlay.hidden = false;
+    if (el.guardrailDismiss) el.guardrailDismiss.focus();
+  }
+  function hideGuardrailReminder() {
+    if (!el.guardrailOverlay) return;
+    el.guardrailOverlay.hidden = true;
+    if (guardrailReturnFocus && typeof guardrailReturnFocus.focus === "function") {
+      guardrailReturnFocus.focus();
+    }
+  }
+
+  // Rising-pitch pips as a live, unresolved bet climbs past round-number
+  // multipliers — a tension cue tied strictly to the player's own money in
+  // flight (never plays for spectators or after cashing out).
+  const MILESTONES = [2, 5, 10, 25, 50, 100];
+  function checkMilestones(m) {
     if (!state.bet || state.bet.resolved) return;
-
-    const now = performance.now();
-    const elapsed = (now - state.roundStartTime) / 1000;
-    state.overdriveActive = true;
-    state.overdriveElapsedAtActivation = elapsed;
-    state.mode = MODE.OVERDRIVE;
-
-    el.gameStage.dataset.mode = "overdrive";
-    pulseOverdrive();
-    playSound("overdrive");
-    announce("Overdrive activated");
-    renderAll();
+    let crossed = false;
+    while (state.milestoneIdx < MILESTONES.length && m >= MILESTONES[state.milestoneIdx]) {
+      state.milestoneIdx += 1;
+      crossed = true;
+    }
+    if (crossed) playSound("milestone", state.milestoneIdx);
   }
 
   /* ------------------------------------------------------------------ */
-  /* 10. Fake live bets (NPCs)                                           */
+  /* 9. Fake live bets (NPCs)                                            */
   /* ------------------------------------------------------------------ */
   // Bet sizes skew small — most players stake modestly, a shrinking few go
   // big — rather than picking uniformly across the chip values.
@@ -604,16 +782,13 @@
 
       const amount = weightedNpcAmount(rng);
       const planned = planNpcCashout(rng);
-      // Bolder targets are more likely to have needed Overdrive to get there.
-      const willOverdrive = rng() < Math.min(0.7, 0.18 + (planned - 1) / 10);
 
       npcs.push({
         id: `${state.roundId}-${i}`,
         name,
         amount,
         planned,
-        willOverdrive,
-        status: "waiting", // waiting | cruise | overdrive | crash
+        status: "waiting", // waiting | cashed | crash
         cashedAt: null,
         warpBornAt: null, // set the instant this NPC cashes out, for its own mini warp animation
         color: FEATURE_FLEET_TABLE ? CONFIG.FLEET_COLORS[colorOrder[i % colorOrder.length]] : null,
@@ -629,7 +804,7 @@
       if (npc.status !== "waiting") continue;
       if (npc.planned >= state.crashPoint) continue; // will crash, resolved on crash
       if (currentMultiplier >= npc.planned) {
-        npc.status = npc.willOverdrive ? "overdrive" : "cruise";
+        npc.status = "cashed";
         npc.cashedAt = npc.planned;
         npc.warpBornAt = performance.now();
         changed = true;
@@ -650,9 +825,24 @@
   /* 11. History                                                         */
   /* ------------------------------------------------------------------ */
   function pushHistory(crashPoint) {
+    // Record the player's own net result for this round (null if they sat
+    // it out). Prefers bet.finalNet — set at resolution in cashOut/
+    // triggerCrash — since that's the only figure that correctly accounts
+    // for a partial cash-out; falls back to the simple calc for safety if
+    // a bet somehow reached here unresolved.
+    const bet = state.bet;
+    let playerNet = null;
+    if (bet) {
+      playerNet = bet.finalNet != null
+        ? bet.finalNet
+        : bet.cashedOutAtMultiplier
+          ? bet.amount * (bet.cashedOutAtMultiplier - 1)
+          : -bet.amount;
+    }
     state.history.unshift({
       id: state.roundId,
       crashPoint,
+      playerNet,
       time: new Date(),
     });
     if (state.history.length > CONFIG.HISTORY_LENGTH) {
@@ -689,16 +879,30 @@
     renderModeLabel();
     renderMultiplier();
     renderMainButton();
-    renderOverdriveButton();
+    renderPartialButton();
     renderResultBanner();
+    renderAutoPill();
     renderCountdownVisibility();
+    renderRecentRounds();
     renderLiveBets();
     renderHistory();
+    renderSessionStats();
     renderBetHint();
   }
 
+  // Balance pulses white->green whenever it goes UP (payout landing is the
+  // real reward moment). Deliberately no pulse on decrease: the deduction
+  // at bet placement is expected, and flashing red at every stake would be
+  // pure noise.
+  let lastBalanceShown = null;
   function renderBalance() {
     el.balanceValue.textContent = formatMoney(state.balance);
+    if (lastBalanceShown != null && state.balance > lastBalanceShown) {
+      el.balanceValue.classList.remove("flash-up");
+      void el.balanceValue.offsetWidth; // restart the CSS animation
+      el.balanceValue.classList.add("flash-up");
+    }
+    lastBalanceShown = state.balance;
   }
 
   // Inline "Insufficient balance" hint — only while the player is actually
@@ -709,7 +913,9 @@
   function renderBetHint() {
     if (!el.betHint) return;
     const amount = clampBetAmount(Number(el.betAmountInput.value));
-    const insufficient = state.phase === PHASE.COUNTDOWN && !state.bet && amount > state.balance;
+    // Relevant whenever the player is choosing an amount for a future bet —
+    // either the countdown's PLACE BET or a mid-round BET NEXT ROUND.
+    const insufficient = !state.bet && state.queuedBet == null && amount > state.balance;
     el.betHint.hidden = !insufficient;
   }
 
@@ -717,8 +923,6 @@
     let label = "CRUISE";
     if (state.phase === PHASE.RESULT) {
       label = state.bet && state.bet.cashedOutAtMultiplier ? "CASHED OUT" : "COLLAPSED";
-    } else if (state.mode === MODE.OVERDRIVE) {
-      label = "OVERDRIVE";
     }
     el.modeLabel.textContent = label;
   }
@@ -763,6 +967,13 @@
 
   function renderCountdown(remainingMs) {
     el.countdownText.textContent = `Next run in ${(remainingMs / 1000).toFixed(1)}s`;
+    // Depleting bar along the bottom of the pill — same information as the
+    // text, but readable at a glance from peripheral vision while the
+    // player's eyes are on the bet controls.
+    if (el.countdownBarFill) {
+      const p = Math.max(0, Math.min(1, remainingMs / (CONFIG.COUNTDOWN_SECONDS * 1000)));
+      el.countdownBarFill.style.transform = `scaleX(${p.toFixed(4)})`;
+    }
   }
 
   function renderCountdownVisibility() {
@@ -772,7 +983,7 @@
   function renderMainButton() {
     const btn = el.mainActionBtn;
     const label = el.mainActionLabel;
-    btn.classList.remove("state-cashout", "state-success", "state-crashed");
+    btn.classList.remove("state-cashout", "state-success", "state-crashed", "state-queued");
     btn.disabled = false;
 
     // Genuinely out of funds is folded into the button itself rather than
@@ -794,49 +1005,86 @@
       }
     } else if (state.phase === PHASE.RUNNING) {
       if (!state.bet) {
-        label.textContent = outOfFunds ? "OUT OF FUNDS" : "NO ACTIVE BET";
-        btn.disabled = true;
+        // No stake in this round: instead of dead time behind a disabled
+        // button, offer entry into the NEXT round (or cancel if queued).
+        if (state.queuedBet != null) {
+          label.textContent = `QUEUED ${formatMoney(state.queuedBet)} — CANCEL`;
+          btn.classList.add("state-queued");
+        } else if (outOfFunds) {
+          label.textContent = "OUT OF FUNDS";
+          btn.disabled = true;
+        } else {
+          label.textContent = "BET NEXT ROUND";
+          const amount = clampBetAmount(Number(el.betAmountInput.value));
+          btn.disabled = amount > state.balance;
+        }
       } else if (state.bet.resolved) {
         label.textContent = `CASHED OUT AT ${formatMult(state.bet.cashedOutAtMultiplier)}`;
         btn.classList.add("state-success");
         btn.disabled = true;
       } else {
-        const payout = state.bet.amount * state.currentMultiplier;
+        // Only the portion still at risk is what cashing out now would pay —
+        // that's remainingAmount, not the original stake, once a partial has
+        // already been banked.
+        const payout = state.bet.remainingAmount * state.currentMultiplier;
         label.textContent = `CASH OUT ${formatMoney(payout)}`;
         btn.classList.add("state-cashout");
       }
     } else if (state.phase === PHASE.RESULT) {
+      // Players who had money in the round get their outcome held on the
+      // button for the full result phase — a deliberate reflection beat,
+      // especially after a loss (no instant "go again" prompt). Spectators
+      // have nothing to reflect on, so they can queue for the next round
+      // immediately.
       if (state.bet && state.bet.cashedOutAtMultiplier) {
         label.textContent = `CASHED OUT AT ${formatMult(state.bet.cashedOutAtMultiplier)}`;
         btn.classList.add("state-success");
+        btn.disabled = true;
       } else if (state.bet && state.bet.lost) {
-        label.textContent = `LOST ${formatMoney(state.bet.amount)}`;
+        // A partial cash-out taken earlier can outweigh the loss on the
+        // portion that crashed — finalNet (set in triggerCrash) is the
+        // honest number, not just "the stake is gone".
+        const net = state.bet.finalNet != null ? state.bet.finalNet : -state.bet.remainingAmount;
+        if (net >= 0) {
+          label.textContent = `COLLAPSED — NET +${formatMoney(net)}`;
+          btn.classList.add("state-success");
+        } else {
+          label.textContent = `LOST ${formatMoney(Math.abs(net))}`;
+          btn.classList.add("state-crashed");
+        }
+        btn.disabled = true;
+      } else if (state.queuedBet != null) {
+        label.textContent = `QUEUED ${formatMoney(state.queuedBet)} — CANCEL`;
+        btn.classList.add("state-queued");
+      } else if (outOfFunds) {
+        label.textContent = "OUT OF FUNDS";
         btn.classList.add("state-crashed");
+        btn.disabled = true;
       } else {
-        label.textContent = `COLLAPSED AT ${formatMult(state.crashPoint)}`;
-        btn.classList.add("state-crashed");
+        label.textContent = "BET NEXT ROUND";
+        const amount = clampBetAmount(Number(el.betAmountInput.value));
+        btn.disabled = amount > state.balance;
       }
-      btn.disabled = true;
     }
   }
 
-  function renderOverdriveButton() {
-    const btn = el.overdriveBtn;
-    btn.classList.remove("state-active");
-
-    const canActivate =
+  // Shows the secondary "BANK HALF" button only in the one window where
+  // it's a valid, still-fresh decision: a live, unresolved bet, mid-flight,
+  // with no partial taken yet. Toggles a layout class on the action row so
+  // it only ever grows to two buttons when there's genuinely a second
+  // action to take — every other state stays the plain single full-width
+  // button.
+  function renderPartialButton() {
+    if (!el.partialCashoutBtn || !el.actionRow) return;
+    const eligible =
       state.phase === PHASE.RUNNING &&
-      !state.overdriveActive &&
-      state.bet &&
-      !state.bet.resolved;
-
-    if (state.overdriveActive && state.phase === PHASE.RUNNING) {
-      el.overdriveBtnLabel.textContent = "OVERDRIVE ACTIVE";
-      btn.classList.add("state-active");
-      btn.disabled = true;
-    } else {
-      el.overdriveBtnLabel.textContent = "ACTIVATE OVERDRIVE";
-      btn.disabled = !canActivate;
+      state.bet && !state.bet.resolved &&
+      state.bet.partials.length === 0;
+    el.partialCashoutBtn.hidden = !eligible;
+    el.actionRow.classList.toggle("has-partial", eligible);
+    if (eligible) {
+      const portion = Math.round((state.bet.remainingAmount / 2) * 100) / 100;
+      el.partialCashoutBtn.textContent = `BANK ${formatMoney(portion)}`;
     }
   }
 
@@ -850,12 +1098,27 @@
     banner.hidden = false;
 
     if (state.bet && state.bet.cashedOutAtMultiplier) {
-      const payout = state.bet.amount * state.bet.cashedOutAtMultiplier;
+      // Net win, not total return — "+$13.50" must equal what the balance
+      // actually gained versus before the round, or the number reads as a
+      // bigger win than it was. finalNet already folds in any partial
+      // cash-out taken earlier in the same round.
+      const net = state.bet.finalNet != null
+        ? state.bet.finalNet
+        : state.bet.amount * (state.bet.cashedOutAtMultiplier - 1);
       banner.className = "result-banner success fade-in";
-      banner.innerHTML = `CASHED OUT AT ${formatMult(state.bet.cashedOutAtMultiplier)}<span class="payout-line">+${formatMoney(payout)}</span>`;
+      banner.innerHTML = `CASHED OUT AT ${formatMult(state.bet.cashedOutAtMultiplier)}<span class="payout-line">+${formatMoney(net)} net win</span>`;
     } else if (state.bet && state.bet.lost) {
-      banner.className = "result-banner crash fade-in";
-      banner.innerHTML = `COLLAPSED AT ${formatMult(state.crashPoint)}<span class="loss-line">LOST ${formatMoney(state.bet.amount)}</span>`;
+      // A partial banked before the crash can outweigh the loss on the
+      // portion that didn't make it — show the honest overall result
+      // rather than implying the whole stake was lost.
+      const net = state.bet.finalNet != null ? state.bet.finalNet : -state.bet.remainingAmount;
+      if (net >= 0) {
+        banner.className = "result-banner success fade-in";
+        banner.innerHTML = `COLLAPSED AT ${formatMult(state.crashPoint)}<span class="payout-line">+${formatMoney(net)} net win</span>`;
+      } else {
+        banner.className = "result-banner crash fade-in";
+        banner.innerHTML = `COLLAPSED AT ${formatMult(state.crashPoint)}<span class="loss-line">LOST ${formatMoney(Math.abs(net))}</span>`;
+      }
     } else {
       banner.className = "result-banner crash fade-in";
       banner.innerHTML = `COLLAPSED AT ${formatMult(state.crashPoint)}`;
@@ -926,11 +1189,14 @@
         const tag = state.bet.resolved
           ? state.bet.lost
             ? { cls: "tag-crash", text: "CRASH" }
-            : state.bet.mode === MODE.OVERDRIVE
-            ? { cls: "tag-overdrive", text: "OVERDRIVE" }
-            : { cls: "tag-cruise", text: "CRUISE" }
+            : { cls: "tag-cashed", text: "CASHED OUT" }
           : { cls: "tag-waiting", text: state.phase === PHASE.COUNTDOWN ? "PENDING" : "IN FLIGHT" };
-        frag.appendChild(buildBetRow("You", state.bet.amount, tag.cls, tag.text, true, SELF_SHIP_COLOR));
+        // Once a partial has been banked, the row shows what's actually
+        // still at risk rather than the original stake — that's the number
+        // that matters for the rest of the round.
+        const hasPartial = state.bet.partials.length > 0;
+        const displayAmount = hasPartial ? state.bet.remainingAmount : state.bet.amount;
+        frag.appendChild(buildBetRow(hasPartial ? "You (partial)" : "You", displayAmount, tag.cls, tag.text, true, SELF_SHIP_COLOR));
         rowCount++;
       }
     } catch (err) {
@@ -942,8 +1208,7 @@
         let tag;
         if (npc.status === "waiting") tag = { cls: "tag-waiting", text: "IN FLIGHT" };
         else if (npc.status === "crash") tag = { cls: "tag-crash", text: "CRASH" };
-        else if (npc.status === "overdrive") tag = { cls: "tag-overdrive", text: formatMult(npc.cashedAt) };
-        else tag = { cls: "tag-cruise", text: formatMult(npc.cashedAt) };
+        else tag = { cls: "tag-cashed", text: formatMult(npc.cashedAt) };
         frag.appendChild(buildBetRow(npc.name, npc.amount, tag.cls, tag.text, false, npc.color));
         rowCount++;
       } catch (err) {
@@ -971,12 +1236,70 @@
       .map((h) => {
         const tier = tierFor(h.crashPoint);
         const time = h.time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const net = h.playerNet;
+        const netHtml =
+          net == null
+            ? ""
+            : `<span class="history-net ${net >= 0 ? "pos" : "neg"}">${net >= 0 ? "+" : "−"}${formatMoney(Math.abs(net))}</span>`;
         return `<li class="history-row">
           <span class="history-chip tier-${tier}">${formatMult(h.crashPoint)}</span>
+          ${netHtml}
           <span class="history-time">${time}</span>
         </li>`;
       })
       .join("");
+  }
+
+  // Compact strip of recent crash points above the betting panel — the
+  // scan-the-recent-rounds ritual shouldn't require opening a side tab
+  // (which on mobile sits below the fold). Rebuilt only from renderAll's
+  // event-driven calls, never per-frame, so the newest chip's one-shot
+  // entrance animation always gets to finish.
+  function renderRecentRounds() {
+    if (!el.recentRounds) return;
+    el.recentRounds.hidden = state.history.length === 0;
+    while (el.recentRounds.firstChild) el.recentRounds.removeChild(el.recentRounds.firstChild);
+    const recent = state.history.slice(0, 10);
+    for (let i = 0; i < recent.length; i++) {
+      const chip = document.createElement("span");
+      chip.className = `history-chip recent-chip tier-${tierFor(recent[i].crashPoint)}${i === 0 ? " newest" : ""}`;
+      chip.setAttribute("role", "listitem");
+      chip.textContent = formatMult(recent[i].crashPoint);
+      el.recentRounds.appendChild(chip);
+    }
+  }
+
+  // "AUTO CASHOUT @ 2.00x" pill under the multiplier while a live bet has
+  // auto-cashout armed — otherwise the armed state is invisible exactly
+  // when it matters.
+  function renderAutoPill() {
+    if (!el.autoPill) return;
+    const show =
+      state.autoCashoutEnabled &&
+      state.bet && !state.bet.resolved &&
+      (state.phase === PHASE.COUNTDOWN || state.phase === PHASE.RUNNING);
+    el.autoPill.hidden = !show;
+    if (show) el.autoPill.textContent = `AUTO CASHOUT @ ${formatMult(state.autoCashoutValue)}`;
+  }
+
+  // Session ledger line atop the History tab: bets, total wagered, net
+  // position — colour-coded both ways, red included. Honest accounting is
+  // the point.
+  function renderSessionStats() {
+    if (!el.sessionStats) return;
+    const s = state.session;
+    if (s.rounds === 0) {
+      el.sessionStats.hidden = true;
+      return;
+    }
+    el.sessionStats.hidden = false;
+    const sign = s.net >= 0 ? "+" : "−";
+    el.sessionStats.innerHTML = "";
+    el.sessionStats.textContent = `This session: ${s.rounds} bet${s.rounds === 1 ? "" : "s"} · ${formatMoney(s.wagered)} wagered · `;
+    const netEl = document.createElement("span");
+    netEl.className = s.net >= 0 ? "session-net pos" : "session-net neg";
+    netEl.textContent = `${sign}${formatMoney(Math.abs(s.net))} net`;
+    el.sessionStats.appendChild(netEl);
   }
 
   function syncChipActiveState() {
@@ -990,12 +1313,6 @@
     // force reflow to restart animation
     void el.crashFlash.offsetWidth;
     el.crashFlash.classList.add("active");
-  }
-
-  function pulseOverdrive() {
-    el.gameStage.classList.remove("pulse");
-    void el.gameStage.offsetWidth;
-    el.gameStage.classList.add("pulse");
   }
 
   /* ------------------------------------------------------------------ */
@@ -1051,7 +1368,7 @@
     src.start(start);
   }
 
-  function playSound(name) {
+  function playSound(name, tier) {
     if (!state.soundOn) return;
     const ctx = getAudioCtx();
     if (!ctx) return;
@@ -1064,11 +1381,14 @@
       } else if (name === "cashout") {
         tone(ctx, { freq: 520, start: t, duration: 0.22, type: "triangle", gain: 0.16, glideTo: 1040 });
         tone(ctx, { freq: 780, start: t + 0.06, duration: 0.22, type: "triangle", gain: 0.12, glideTo: 1300 });
-      } else if (name === "overdrive") {
-        tone(ctx, { freq: 180, start: t, duration: 0.35, type: "sawtooth", gain: 0.1, glideTo: 420 });
       } else if (name === "crash") {
         noiseBurst(ctx, { start: t, duration: 0.4, gain: 0.24 });
         tone(ctx, { freq: 140, start: t, duration: 0.3, type: "square", gain: 0.1, glideTo: 40 });
+      } else if (name === "milestone") {
+        // Short pip, rising in pitch with each milestone crossed — quiet
+        // enough to read as a tick of tension, not a celebration.
+        const idx = Math.max(1, tier | 0);
+        tone(ctx, { freq: 540 + idx * 80, start: t, duration: 0.06, type: "sine", gain: 0.07 });
       }
     } catch (err) {
       console.error("[VECTOR] sound playback failed:", err);
@@ -1352,19 +1672,17 @@
   let lastFrameTime = performance.now();
 
   function currentSpeedFactor() {
-    // Baseline idle drift, rising with mode & multiplier for perceived speed.
+    // Baseline idle drift, rising with the multiplier for perceived speed.
     // Deliberately uncapped (log growth self-limits the rate of increase,
     // but there's no hard plateau) so the tunnel keeps visibly accelerating
     // all the way through high multipliers instead of feeling the same
     // from 10x to 100x.
     if (state.phase === PHASE.RUNNING) {
-      // Cruise speed eases in over the first couple of seconds rather than
+      // Speed eases in over the first couple of seconds rather than
       // snapping straight to full speed the instant the round launches.
-      // Overdrive's kick stays instant — that abruptness is the point.
       const elapsed = state.roundStartTime != null ? (performance.now() - state.roundStartTime) / 1000 : 0;
       const rampIn = Math.min(1, elapsed / CONFIG.SPEED_RAMP_SECONDS);
-      const cruiseBase = 0.5 + 0.5 * rampIn;
-      const base = state.overdriveActive ? 2.6 : cruiseBase;
+      const base = 0.5 + 0.5 * rampIn;
       const growth = Math.log(Math.max(1, state.currentMultiplier)) * 0.42;
       return base + growth;
     }
@@ -1379,7 +1697,6 @@
       }
       return { r: 255, g: 84, b: 104 }; // crash red
     }
-    if (state.overdriveActive) return { r: 200, g: 90, b: 255 }; // violet/magenta
     return { r: 79, g: 216, b: 255 }; // cyan
   }
 
@@ -1396,8 +1713,7 @@
     return Math.sin(Math.min(1, p) * Math.PI);
   }
 
-  // Contrail length: live while running (mirrors the multiplier's
-  // piecewise cruise/overdrive growth), frozen at the value captured the
+  // Contrail length: live while running, frozen at the value captured the
   // instant the round crashed, or a small idle length before launch.
   function trailLenFor(now) {
     if (state.phase === PHASE.RUNNING) return computeTrailLength(now);
@@ -1552,19 +1868,6 @@
       ctx.moveTo(startX, startY);
       ctx.quadraticCurveTo(midX, midY, endX, endY);
       ctx.stroke();
-
-      // Overdrive instability: a small spark fork breaking off the trail
-      if (state.overdriveActive && len > 55) {
-        const forkT = 0.76;
-        const fx = startX + (endX - startX) * forkT;
-        const fy = startY + (endY - startY) * forkT;
-        ctx.globalAlpha = 0.55 * alpha;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(fx, fy);
-        ctx.lineTo(fx + flare * 13, fy + 9);
-        ctx.stroke();
-      }
     }
     ctx.globalAlpha = 1;
   }
@@ -1694,7 +1997,7 @@
 
       if (npc.status === "waiting") {
         drawFleetShip(x, y + bob, npc.slot.scale, 1, npc.color, rotation);
-      } else if ((npc.status === "cruise" || npc.status === "overdrive") && npc.warpBornAt != null) {
+      } else if (npc.status === "cashed" && npc.warpBornAt != null) {
         const warpAge = now - npc.warpBornAt;
         if (warpAge < CONFIG.CASHOUT_WARP_MS) {
           drawFleetWarp(x, y + bob, npc.slot.scale, npc.color, warpAge, rotation);
@@ -1712,7 +2015,7 @@
 
   function drawShip(baseX, baseY, now, palette, speed) {
     // Successful cashout departs on its own short-lived animation, entirely
-    // separate from the normal idle/cruise/overdrive/crash rendering below.
+    // separate from the normal idle/cruise/crash rendering below.
     if (state.cashoutWarp) {
       const warpAge = now - state.cashoutWarp.bornAt;
       if (warpAge >= CONFIG.CASHOUT_WARP_MS) {
@@ -1739,8 +2042,7 @@
 
     const bob = prefersReducedMotion ? 0 : Math.sin(now / 520) * 3;
     const roll = prefersReducedMotion ? 0 : Math.sin(now / 900) * 0.03;
-    const jitter = state.overdriveActive && !prefersReducedMotion ? Math.sin(now / 60) * 1.2 : 0;
-    const x = baseX + jitter;
+    const x = baseX;
     const y = baseY + bob;
 
     const trailLen = trailLenFor(now);
@@ -2006,6 +2308,7 @@
       state.autoCashoutEnabled = !state.autoCashoutEnabled;
       el.autoCashoutToggle.setAttribute("aria-checked", String(state.autoCashoutEnabled));
       el.autoCashoutValue.disabled = !state.autoCashoutEnabled;
+      renderAutoPill();
     });
     el.autoCashoutValue.addEventListener("input", () => {
       let v = Number(el.autoCashoutValue.value);
@@ -2015,6 +2318,7 @@
       // possibly trigger.
       v = Math.min(v, CONFIG.MAX_VISIBLE_MULTIPLIER);
       if (v >= 1.01) state.autoCashoutValue = v;
+      renderAutoPill();
     });
 
     el.resetBalanceBtn.addEventListener("click", resetBalance);
@@ -2028,6 +2332,36 @@
       buildStarfield();
       buildDebris();
     });
+
+    // Session loss-reminder guardrail — opt-in, off by default.
+    if (el.guardrailToggle) {
+      el.guardrailToggle.addEventListener("click", () => {
+        state.guardrail.enabled = !state.guardrail.enabled;
+        el.guardrailToggle.setAttribute("aria-checked", String(state.guardrail.enabled));
+        if (el.guardrailThresholdRow) el.guardrailThresholdRow.hidden = !state.guardrail.enabled;
+        // Turning it on (or back on) gives it a fresh shot at firing again
+        // this session; turning it off cancels any reminder already queued.
+        if (state.guardrail.enabled) {
+          state.guardrail.triggered = false;
+        } else {
+          state.guardrail.pending = false;
+        }
+      });
+    }
+    if (el.guardrailThresholdInput) {
+      el.guardrailThresholdInput.addEventListener("input", () => {
+        const v = Number(el.guardrailThresholdInput.value);
+        if (!isNaN(v) && v > 0) state.guardrail.threshold = Math.min(5000, v);
+      });
+    }
+    if (el.guardrailDismiss) el.guardrailDismiss.addEventListener("click", hideGuardrailReminder);
+    if (el.guardrailOverlay) {
+      el.guardrailOverlay.addEventListener("click", (e) => {
+        if (e.target === el.guardrailOverlay) hideGuardrailReminder();
+      });
+    }
+
+    if (el.partialCashoutBtn) el.partialCashoutBtn.addEventListener("click", partialCashOut);
 
     // Settings popover
     el.settingsBtn.addEventListener("click", () => {
@@ -2050,15 +2384,26 @@
     });
 
     el.mainActionBtn.addEventListener("click", () => {
-      if (state.phase === PHASE.COUNTDOWN && !state.bet) placeBet();
-      else if (state.phase === PHASE.RUNNING && state.bet && !state.bet.resolved) cashOut();
+      if (state.phase === PHASE.COUNTDOWN && !state.bet) {
+        placeBet();
+      } else if (state.phase === PHASE.RUNNING && state.bet && !state.bet.resolved) {
+        cashOut();
+      } else if (
+        // Queue / cancel entry into the next round while this one is still
+        // in flight or resolving — only for players with no bet outcome
+        // being displayed (their button is a disabled outcome readout).
+        (state.phase === PHASE.RUNNING || state.phase === PHASE.RESULT) &&
+        !state.bet
+      ) {
+        toggleQueuedBet();
+      }
     });
-    el.overdriveBtn.addEventListener("click", activateOverdrive);
 
     // Keyboard shortcuts (layered on top of native tab/enter/space support).
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         if (!el.howToPlayOverlay.hidden) hideHowToPlay();
+        if (el.guardrailOverlay && !el.guardrailOverlay.hidden) hideGuardrailReminder();
         if (!el.settingsPopover.hidden) {
           el.settingsPopover.hidden = true;
           el.settingsBtn.setAttribute("aria-expanded", "false");
@@ -2074,8 +2419,6 @@
       if (e.code === "Space") {
         e.preventDefault();
         el.mainActionBtn.click();
-      } else if (e.key.toLowerCase() === "o") {
-        el.overdriveBtn.click();
       }
     });
 
@@ -2087,6 +2430,20 @@
       if (willOpen) {
         el.fairRound.textContent = `#${state.roundId}`;
         el.fairSeed.textContent = state.seedHash || "—";
+        // Commit-reveal shape, honestly simulated: the hash is shown
+        // before the round, the raw seed only once the round resolves.
+        if (el.fairSeedRevealed) {
+          el.fairSeedRevealed.textContent =
+            state.phase === PHASE.RESULT && state.seed != null
+              ? `0x${state.seed.toString(16).padStart(8, "0")}`
+              : "Revealed after round";
+        }
+        // Computed from CONFIG so this display can never drift from the
+        // actual maths: (1 - instant-crash share) x the curve's 0.99.
+        if (el.fairEdge) {
+          const rtp = (1 - CONFIG.HOUSE_EDGE) * 0.99;
+          el.fairEdge.textContent = `${((1 - rtp) * 100).toFixed(1)}% (RTP ${(rtp * 100).toFixed(1)}%)`;
+        }
         el.fairResult.textContent =
           state.phase === PHASE.RESULT ? formatMult(state.crashPoint) : "Pending — locked in";
       }
@@ -2169,10 +2526,11 @@
     // any gameplay behaviour.
     window.__VECTOR_DEBUG__ = { state, CONFIG, el };
 
-    // First-time onboarding: Overdrive is the one genuinely novel mechanic
-    // here and nothing else in the UI explains it, so show the rules once
-    // per session. Not persisted across reloads — a prototype doesn't need
-    // storage for this, and it's harmless to see again after a refresh.
+    // First-time onboarding: show the rules once per session so a new
+    // player knows how cashing out and the collapse point work before
+    // placing a bet. Not persisted across reloads — a prototype doesn't
+    // need storage for this, and it's harmless to see again after a
+    // refresh.
     showHowToPlay();
   }
 

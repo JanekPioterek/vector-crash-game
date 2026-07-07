@@ -8,7 +8,7 @@
    5. Game stage (tunnel, multiplier, overlays)
    6. Betting panel
    7. Side panel (tabs, live bets, history)
-   8. Mode states (cruise / overdrive / crash)
+   8. Mode states (cruise / crash)
    9. Motion & effects
    10. Responsive / mobile
    11. Accessibility (focus, reduced motion)
@@ -38,11 +38,12 @@
   --cruise-2: #7fe9ff;
   --cruise-glow: rgba(79, 216, 255, 0.35);
 
-  /* overdrive (violet / magenta / hot orange) */
-  --overdrive-1: #b46bff;
-  --overdrive-2: #ff4fd8;
-  --overdrive-3: #ff8a3d;
-  --overdrive-glow: rgba(180, 107, 255, 0.4);
+  /* violet/magenta accent — no longer tied to a game mechanic (Overdrive
+     was removed), kept as a distinct accent colour for the history list's
+     "high" multiplier tier */
+  --violet-1: #b46bff;
+  --violet-2: #ff4fd8;
+  --violet-glow: rgba(180, 107, 255, 0.4);
 
   /* success / cashout */
   --success-1: #baff6b;
@@ -396,12 +397,24 @@ kbd{
   color: var(--text-secondary);
   letter-spacing: 0.04em;
 }
-.countdown-wrap span{
+.countdown-pill{
+  position: relative;
+  overflow: hidden;
+  display: inline-block;
   padding: 6px 14px;
   border: 1px solid var(--border-soft);
   border-radius: 999px;
   background: rgba(0,0,0,0.35);
   backdrop-filter: blur(4px);
+}
+/* depleting time bar along the bottom of the pill, scaleX set by JS */
+.countdown-bar-fill{
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 2px;
+  background: var(--cruise-1);
+  opacity: 0.55;
+  transform-origin: left center;
 }
 
 .crash-flash{
@@ -516,7 +529,8 @@ kbd{
 .toggle[aria-checked="true"] .toggle-track{ background: rgba(79,216,255,0.25); border-color: var(--cruise-1); }
 .toggle[aria-checked="true"] .toggle-thumb{ transform: translateX(16px); background: var(--cruise-1); }
 
-.action-row{ display: grid; grid-template-columns: 1fr 1.4fr; gap: 10px; }
+.action-row{ display: grid; grid-template-columns: 1fr; gap: 10px; }
+.action-row.has-partial{ grid-template-columns: 0.85fr 1.4fr; }
 .btn{
   position: relative;
   padding: 16px 18px;
@@ -558,20 +572,6 @@ kbd{
   0%, 100%{ box-shadow: 0 8px 28px rgba(186,255,107,0.3), inset 0 1px 0 rgba(255,255,255,0.5); }
   50%{ box-shadow: 0 8px 34px rgba(186,255,107,0.55), inset 0 1px 0 rgba(255,255,255,0.5); }
 }
-
-.btn-overdrive{
-  background: var(--surface-2);
-  color: var(--overdrive-1);
-  border: 1px solid rgba(180,107,255,0.4);
-}
-.btn-overdrive:hover:not(:disabled){ background: rgba(180,107,255,0.1); box-shadow: 0 0 20px rgba(180,107,255,0.15); }
-.btn-overdrive.state-active{
-  background: linear-gradient(120deg, var(--overdrive-1), var(--overdrive-2));
-  color: #1a0322;
-  border-color: transparent;
-  box-shadow: 0 0 30px var(--overdrive-glow);
-}
-.btn-icon{ font-size: 13px; }
 
 /* ---------------------------------------------------------------------- */
 /* 7. Side panel                                                          */
@@ -651,8 +651,7 @@ kbd{
   color: var(--text-tertiary);
 }
 .bet-tag.tag-waiting{ color: var(--text-tertiary); }
-.bet-tag.tag-cruise{ color: var(--cruise-1); border-color: rgba(79,216,255,0.35); background: rgba(79,216,255,0.08); }
-.bet-tag.tag-overdrive{ color: var(--overdrive-2); border-color: rgba(255,79,216,0.35); background: rgba(255,79,216,0.08); }
+.bet-tag.tag-cashed{ color: var(--cruise-1); border-color: rgba(79,216,255,0.35); background: rgba(79,216,255,0.08); }
 .bet-tag.tag-crash{ color: var(--crash-1); border-color: rgba(255,84,104,0.35); background: rgba(255,84,104,0.08); }
 
 .history-row{
@@ -671,7 +670,7 @@ kbd{
 }
 .history-chip.tier-low{ color: var(--text-secondary); }
 .history-chip.tier-mid{ color: var(--cruise-1); border-color: rgba(79,216,255,0.3); background: rgba(79,216,255,0.06); }
-.history-chip.tier-high{ color: var(--overdrive-2); border-color: rgba(255,79,216,0.3); background: rgba(255,79,216,0.06); }
+.history-chip.tier-high{ color: var(--violet-2); border-color: rgba(255,79,216,0.3); background: rgba(255,79,216,0.06); }
 .history-chip.tier-extreme{ color: var(--success-2); border-color: rgba(255,215,94,0.4); background: rgba(255,215,94,0.08); }
 .history-time{ color: var(--text-tertiary); font-size: 11px; }
 
@@ -680,24 +679,6 @@ kbd{
 /* ---------------------------------------------------------------------- */
 /* 8. Mode states — global stage theming                                  */
 /* ---------------------------------------------------------------------- */
-.game-stage[data-mode="overdrive"]{
-  box-shadow:
-    inset 0 0 0 1px rgba(180,107,255,0.08),
-    inset 0 40px 90px rgba(60,0,60,0.35),
-    0 0 70px rgba(180,107,255,0.18),
-    0 20px 60px rgba(0,0,0,0.45);
-}
-.game-stage[data-mode="overdrive"] .mode-label{
-  color: var(--overdrive-2);
-  border-color: rgba(255,79,216,0.4);
-  background: rgba(180,107,255,0.08);
-  text-shadow: 0 0 16px var(--overdrive-glow);
-}
-.game-stage[data-mode="overdrive"] .multiplier{
-  color: #fff;
-  text-shadow: 0 0 40px var(--overdrive-glow), 0 0 12px var(--overdrive-2);
-}
-
 .game-stage[data-mode="crashed"] .mode-label{
   color: var(--crash-1);
   border-color: rgba(255,84,104,0.4);
@@ -737,18 +718,101 @@ kbd{
   to{ transform: translateY(0); opacity: 1; }
 }
 
-/* overdrive activation pulse */
-.game-stage.pulse::after{
-  content: "";
-  position: absolute; inset: 0;
-  background: radial-gradient(ellipse at center, rgba(180,107,255,0.35), transparent 70%);
-  animation: overdrivePulse 650ms ease-out forwards;
-  pointer-events: none;
+/* ---------------------------------------------------------------------- */
+/* 8b. Recent rounds ribbon, auto pill, queue state, session stats        */
+/* ---------------------------------------------------------------------- */
+/* Strip of the last ~10 crash points between stage and betting panel.
+   Rebuilt only on discrete round events (never per-frame), so the newest
+   chip's one-shot pop animation always completes. */
+.recent-rounds{
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  overflow-x: auto;
+  padding: 0 2px;
+  scrollbar-width: none;
 }
-@keyframes overdrivePulse{
-  0%{ opacity: 1; }
-  100%{ opacity: 0; }
+.recent-rounds::-webkit-scrollbar{ display: none; }
+.recent-rounds[hidden]{ display: none; }
+.recent-chip{ flex-shrink: 0; font-size: 11px; padding: 3px 9px; background: var(--surface-1); }
+.recent-chip.newest{ animation: chipPop .25s var(--ease-snap); }
+@keyframes chipPop{
+  from{ transform: scale(.7); opacity: 0; }
+  to{ transform: scale(1); opacity: 1; }
 }
+
+/* "AUTO CASHOUT @ 2.00x" pill under the multiplier while armed */
+.auto-pill{
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .05em;
+  color: var(--cruise-1);
+  padding: 4px 12px;
+  border: 1px solid rgba(79,216,255,0.3);
+  border-radius: 999px;
+  background: rgba(79,216,255,0.07);
+}
+.auto-pill[hidden]{ display: none; }
+
+/* Queued-for-next-round button state: intentionally quieter than PLACE
+   BET / CASH OUT — it's a standing instruction, not the hot action */
+.btn-main.state-queued{
+  background: var(--surface-3);
+  color: var(--cruise-1);
+  border-color: rgba(79,216,255,0.45);
+  box-shadow: none;
+}
+.btn-main.state-queued:hover:not(:disabled){ filter: none; background: var(--surface-2); }
+
+/* Bank Half — deliberately quieter than the main cashout button (an
+   optional side decision, not the primary action) and hidden entirely
+   whenever it isn't a valid move, via [hidden] rather than opacity so it
+   never intercepts clicks. */
+.btn-secondary{
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-soft);
+  box-shadow: none;
+}
+.btn-secondary:hover:not(:disabled){ color: var(--text-primary); border-color: var(--border-strong); background: var(--surface-3); }
+.btn-secondary[hidden]{ display: none; }
+
+/* Settings: session loss-reminder threshold field, same shape as the
+   auto-cashout field above it in the betting panel */
+.guardrail-threshold-row{ margin: 4px 0 12px; }
+.guardrail-threshold-row .field-label{ margin-bottom: 6px; }
+.guardrail-threshold-row[hidden]{ display: none; }
+
+/* balance pulses white -> green when a payout lands */
+.balance-value.flash-up{ animation: balanceUp .9s var(--ease-out); }
+@keyframes balanceUp{
+  0%{ color: #ffffff; text-shadow: 0 0 14px var(--success-glow); }
+  100%{ color: var(--success-1); text-shadow: none; }
+}
+
+/* session ledger atop the History tab */
+.session-stats{
+  padding: 10px 14px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface-2);
+}
+.session-stats[hidden]{ display: none; }
+.session-net{ font-family: var(--font-mono); font-weight: 700; }
+.session-net.pos{ color: var(--success-1); }
+.session-net.neg{ color: var(--crash-1); }
+
+/* the player's own net result on history rows they took part in */
+.history-net{ font-family: var(--font-mono); font-size: 11.5px; }
+.history-net.pos{ color: var(--success-1); }
+.history-net.neg{ color: var(--crash-1); }
+
+/* sound toggle: wave when on, slash when muted */
+#soundToggle .snd-wave{ display: none; }
+#soundToggle[aria-pressed="true"] .snd-wave{ display: block; }
+#soundToggle[aria-pressed="true"] .snd-off{ display: none; }
 
 /* ---------------------------------------------------------------------- */
 /* 9. Misc motion                                                         */
@@ -790,7 +854,7 @@ kbd{
     padding-right: max(12px, env(safe-area-inset-right));
     gap: 10px;
   }
-  .action-row{ grid-template-columns: 1fr 1.3fr; gap: 8px; }
+  .action-row{ grid-template-columns: 1fr; }
   .btn{ padding: 14px 10px; font-size: 12.5px; min-height: 44px; }
 
   /* touch target minimum ~44px per platform guidelines */
