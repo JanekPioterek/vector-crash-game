@@ -39,9 +39,29 @@
     // RTP/house edge live in roundProvider.js (VECTOR-PF-v1) — this app
     // never redefines them locally, so there is exactly one source of truth
     // for the number that actually determines payouts.
-    COUNTDOWN_SECONDS: 3.0,
+    // Pacing polish pass: widened from 3.0s so players have real time to
+    // read the odds, edit stake/auto-cashout and place a bet before launch.
+    // See renderCountdown() for the BETS OPEN / LAST CHANCE / LAUNCHING
+    // tiering this window is split into.
+    COUNTDOWN_SECONDS: 6.0,
     RESULT_DISPLAY_SECONDS: 2.6,
+    // A crash at/below this multiplier gets extra hold time on the result
+    // screen (see LOW_CRASH_EXTRA_HOLD_SECONDS) — purely a display-duration
+    // choice, made after the real crash multiplier is already settled, so it
+    // cannot affect the outcome, RTP, or when the NEXT round's odds apply.
+    LOW_CRASH_THRESHOLD: 1.2,
+    LOW_CRASH_EXTRA_HOLD_SECONDS: 1.1,
     GROWTH_RATE: 0.1, // exponential growth constant for the multiplier (per second)
+    // Flight-pacing warp (pure display/animation timing — see warpedElapsed()
+    // below): the visual multiplier climbs noticeably slower for the first
+    // few seconds of a round, then eases back up to the exact same long-run
+    // rate GROWTH_RATE always had, so momentum at high multipliers is
+    // unchanged. This never touches state.crashPoint, the settlement value,
+    // or the odds — it only changes how many real seconds it visually takes
+    // to get anywhere, which is what makes early flight (and especially very
+    // low crashes like 1.03x-1.09x) readable instead of instantaneous.
+    FLIGHT_WARP_DELAY: 2.72, // seconds; the asymptotic "extra time" borrowed from later in the flight
+    FLIGHT_WARP_DECAY: 3.0, // seconds; how quickly the warp eases back out to full speed
     SPEED_RAMP_SECONDS: 2.4, // visual tunnel speed eases in over this many seconds after launch
     MAX_VISIBLE_MULTIPLIER: 1000,
     TRAIL_BASE_LEN: 22, // px, contrail length at round start
@@ -374,18 +394,46 @@
   /* ------------------------------------------------------------------ */
   /* 5. Multiplier calculation                                           */
   /* ------------------------------------------------------------------ */
-  // multiplier(t) is a continuous exponential curve — it never touches
-  // state.crashPoint, which is generated and locked in before the round
-  // starts and cannot be influenced by anything the player does in-round.
-  function computeMultiplier(nowMs) {
-    const t = (nowMs - state.roundStartTime) / 1000;
-    return Math.exp(CONFIG.GROWTH_RATE * t);
+  // Reparametrizes real elapsed seconds into "curve time" for the visual
+  // flight only. w(t) = t - A*(1 - e^(-t/B)):
+  //   - w(0) = 0 exactly, so an instant 1.00x crash still displays as
+  //     instant — no artificial minimum flight duration is introduced.
+  //   - Early on, w(t) grows much slower than t (deliberately slow, readable
+  //     opening seconds — this is the entire fix for low crashes like
+  //     1.03x-1.09x feeling like a glitch: reaching them now visibly takes
+  //     ~4x longer in real seconds than before).
+  //   - dw/dt -> 1 as t grows, so for high multipliers the curve's rate of
+  //     change converges back to exactly CONFIG.GROWTH_RATE's original
+  //     pace — same momentum/urgency/acceleration feel at altitude, just
+  //     phase-shifted a couple of seconds later than before.
+  //   - Smooth (infinitely differentiable) and strictly increasing for
+  //     every t >= 0 given A/B < 1, so there is never a visual stall,
+  //     freeze, or backward jump.
+  // A=2.72, B=3.0 were picked so the multiplier reads around ~1.25-1.30x at
+  // t=4.5s (the "first 4.5 seconds should be slow and readable" target).
+  function warpedElapsed(tSeconds) {
+    const A = CONFIG.FLIGHT_WARP_DELAY;
+    const B = CONFIG.FLIGHT_WARP_DECAY;
+    return tSeconds - A * (1 - Math.exp(-tSeconds / B));
   }
 
-  // Contrail length grows linearly with elapsed flight time, in step with
-  // the multiplier's own growth.
-  function computeTrailLength(nowMs) {
+  // multiplier(t) is a continuous curve over warped time — it never touches
+  // state.crashPoint, which is generated and locked in before the round
+  // starts and cannot be influenced by anything the player does in-round,
+  // or by this animation-pacing change. A cash-out click still pays out
+  // exactly state.currentMultiplier (this same function's value at that
+  // instant), so there is no mismatch between what's displayed and what
+  // settles — only the pacing of getting there changed.
+  function computeMultiplier(nowMs) {
     const t = (nowMs - state.roundStartTime) / 1000;
+    return Math.exp(CONFIG.GROWTH_RATE * warpedElapsed(t));
+  }
+
+  // Contrail length grows with warped elapsed flight time too, so it stays
+  // visually in step with the (now re-paced) multiplier's own growth
+  // instead of racing ahead of a multiplier that's climbing slower.
+  function computeTrailLength(nowMs) {
+    const t = warpedElapsed((nowMs - state.roundStartTime) / 1000);
     const len = CONFIG.TRAIL_BASE_LEN + CONFIG.TRAIL_RATE * t;
     return Math.min(CONFIG.TRAIL_MAX_LEN, len);
   }
@@ -440,7 +488,17 @@
     state.trailFrozenLen = computeTrailLength(now);
     state.phase = PHASE.RESULT;
     state.currentMultiplier = state.crashPoint;
-    state.resultEndTime = performance.now() + CONFIG.RESULT_DISPLAY_SECONDS * 1000;
+    // Low crashes (<= LOW_CRASH_THRESHOLD) get a bit more hold time on the
+    // result screen — the actual crash multiplier above is already fully
+    // settled by this point; this only changes how long the READOUT stays
+    // up before the next countdown starts, so a very fast round still gets
+    // a moment to register as a real, deliberate outcome rather than a
+    // blink-and-you-missed-it flicker.
+    const holdSeconds =
+      state.crashPoint <= CONFIG.LOW_CRASH_THRESHOLD
+        ? CONFIG.RESULT_DISPLAY_SECONDS + CONFIG.LOW_CRASH_EXTRA_HOLD_SECONDS
+        : CONFIG.RESULT_DISPLAY_SECONDS;
+    state.resultEndTime = performance.now() + holdSeconds * 1000;
     el.gameStage.dataset.mode = "crashed";
 
     resolveNpcsOnCrash();
@@ -1005,8 +1063,32 @@
     }
   }
 
+  // Tiers the 6-second betting window into three readable states rather
+  // than a bare decimal timer — "how much time is left" matters less than
+  // "what can I still do right now". Boundaries: >=4s BETS OPEN, 2-3s LAST
+  // CHANCE (betting stays enabled the whole time — nothing actually locks
+  // early), 1s LAUNCHING. Purely a display tier; the real bet-lock moment
+  // is unchanged (COUNTDOWN -> RUNNING in beginRound()).
+  function countdownTier(displaySeconds) {
+    if (displaySeconds >= 4) return { label: "BETS OPEN", cls: "is-bets-open" };
+    if (displaySeconds >= 2) return { label: "LAST CHANCE", cls: "is-last-chance" };
+    return { label: "LAUNCHING", cls: "is-launching" };
+  }
+
   function renderCountdown(remainingMs) {
-    el.countdownText.textContent = `Next run in ${(remainingMs / 1000).toFixed(1)}s`;
+    const displaySeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+    const tier = countdownTier(displaySeconds);
+    el.countdownText.textContent = `${tier.label} · ${displaySeconds}`;
+
+    if (el.countdownWrap) {
+      el.countdownWrap.classList.remove("is-bets-open", "is-last-chance", "is-launching");
+      el.countdownWrap.classList.add(tier.cls);
+      // Subtle anticipation tension in the final 2 seconds only (LAST
+      // CHANCE·2 and LAUNCHING·1) — a gentle pulse, not a flash; see
+      // .countdown-wrap.is-anticipating in styles.css.
+      el.countdownWrap.classList.toggle("is-anticipating", displaySeconds <= 2);
+    }
+
     // Depleting bar along the bottom of the pill — same information as the
     // text, but readable at a glance from peripheral vision while the
     // player's eyes are on the bet controls.
@@ -1018,6 +1100,18 @@
 
   function renderCountdownVisibility() {
     el.countdownWrap.style.opacity = state.phase === PHASE.COUNTDOWN ? "1" : "0";
+  }
+
+  // Missed-bet recovery copy (spec: don't make a player re-enter settings
+  // just because they missed this round's window) — surfaces the stake AND
+  // the auto cash-out target together so it's clear both carried forward
+  // untouched, not just the dollar amount.
+  function queuedBetLabel() {
+    // Kept deliberately short (one line, no wrap) — see #mainActionLabel's
+    // white-space/ellipsis rule in styles.css, which backstops this against
+    // ever wrapping to a second line and shifting the panel's height.
+    const auto = state.autoCashoutEnabled ? ` @ ${formatMult(state.autoCashoutValue)} AUTO` : "";
+    return `READY · ${formatMoney(state.queuedBet)}${auto} — CANCEL`;
   }
 
   function renderMainButton() {
@@ -1048,7 +1142,7 @@
         // No stake in this round: instead of dead time behind a disabled
         // button, offer entry into the NEXT round (or cancel if queued).
         if (state.queuedBet != null) {
-          label.textContent = `QUEUED ${formatMoney(state.queuedBet)} — CANCEL`;
+          label.textContent = queuedBetLabel();
           btn.classList.add("state-queued");
         } else if (outOfFunds) {
           label.textContent = "OUT OF FUNDS";
@@ -1094,7 +1188,7 @@
         }
         btn.disabled = true;
       } else if (state.queuedBet != null) {
-        label.textContent = `QUEUED ${formatMoney(state.queuedBet)} — CANCEL`;
+        label.textContent = queuedBetLabel();
         btn.classList.add("state-queued");
       } else if (outOfFunds) {
         label.textContent = "OUT OF FUNDS";
@@ -1410,12 +1504,18 @@
   // when it matters.
   function renderAutoPill() {
     if (!el.autoPill) return;
+    // "Armed" here means: there is a stake committed to a round (either a
+    // live unresolved bet this round, or a queued bet lined up for the
+    // next one) AND auto cash-out is switched on — the player should be
+    // able to see this confirmation before every launch, not just while
+    // a bet happens to already be running.
+    const hasCommittedStake = (state.bet && !state.bet.resolved) || (!state.bet && state.queuedBet != null);
     const show =
       state.autoCashoutEnabled &&
-      state.bet && !state.bet.resolved &&
-      (state.phase === PHASE.COUNTDOWN || state.phase === PHASE.RUNNING);
+      hasCommittedStake &&
+      (state.phase === PHASE.COUNTDOWN || state.phase === PHASE.RUNNING || state.phase === PHASE.RESULT);
     el.autoPill.hidden = !show;
-    if (show) el.autoPill.textContent = `AUTO CASHOUT @ ${formatMult(state.autoCashoutValue)}`;
+    if (show) el.autoPill.textContent = `AUTO CASHOUT ARMED · ${formatMult(state.autoCashoutValue)}`;
   }
 
   // Session ledger line atop the History tab: bets, total wagered, net

@@ -477,6 +477,10 @@ kbd{
   font-size: 13px;
   color: var(--text-secondary);
   letter-spacing: 0.04em;
+  /* Fades in/out with the phase change (see renderCountdownVisibility)
+     instead of snapping, so entering/leaving the betting window reads as
+     an intentional handoff rather than a UI element popping in and out. */
+  transition: opacity .25s var(--ease-out);
 }
 .countdown-pill{
   position: relative;
@@ -487,6 +491,9 @@ kbd{
   border-radius: 999px;
   background: rgba(0,0,0,0.35);
   backdrop-filter: blur(4px);
+  /* Smooth colour handoff between BETS OPEN / LAST CHANCE / LAUNCHING —
+     an intentional, gradual shift rather than a hard cut between states. */
+  transition: color .3s var(--ease-out), border-color .3s var(--ease-out), box-shadow .3s var(--ease-out);
 }
 /* depleting time bar along the bottom of the pill, scaleX set by JS */
 .countdown-bar-fill{
@@ -496,6 +503,35 @@ kbd{
   background: var(--cruise-1);
   opacity: 0.55;
   transform-origin: left center;
+  transition: background-color .3s var(--ease-out);
+}
+
+/* Countdown tiers (see renderCountdown() in script.js) — BETS OPEN keeps
+   the pill's original quiet cyan/neutral look; LAST CHANCE warms to amber
+   as a gentle "wrap it up" cue; LAUNCHING brightens to full cyan urgency.
+   Colour only — no size/position change, so nothing else in the panel
+   ever shifts as the tiers advance. */
+.countdown-wrap.is-last-chance .countdown-pill{
+  color: var(--success-2);
+  border-color: rgba(255, 215, 94, 0.35);
+}
+.countdown-wrap.is-last-chance .countdown-bar-fill{ background: var(--success-2); }
+.countdown-wrap.is-launching .countdown-pill{
+  color: var(--cruise-2);
+  border-color: rgba(79, 216, 255, 0.5);
+}
+.countdown-wrap.is-launching .countdown-bar-fill{ background: var(--cruise-2); }
+
+/* Subtle anticipation tension for the final 2 seconds (LAST CHANCE·2 and
+   LAUNCHING·1) — a slow, gentle breathing glow, not a flash or a shake.
+   Neutralized automatically by the global prefers-reduced-motion override
+   below, same as every other keyframe animation in this file. */
+.countdown-wrap.is-anticipating .countdown-pill{
+  animation: countdownAnticipate 1s ease-in-out infinite;
+}
+@keyframes countdownAnticipate{
+  0%, 100%{ box-shadow: 0 0 0 rgba(79, 216, 255, 0); }
+  50%{ box-shadow: 0 0 10px rgba(79, 216, 255, 0.35); }
 }
 
 .crash-flash{
@@ -635,6 +671,16 @@ kbd{
   display: flex; align-items: center; justify-content: center; gap: 8px;
   border: 1px solid transparent;
   transition: transform .08s var(--ease-out), filter .15s var(--ease-out), background .2s var(--ease-out), box-shadow .2s var(--ease-out), border-color .2s;
+}
+/* Some states pack more into this label than others (e.g. the queued-bet
+   recovery copy, which includes stake + auto-cashout target). Never let it
+   wrap to a second line and grow the button/panel — clip with an ellipsis
+   instead, so every button state keeps the exact same single-line height. */
+#mainActionLabel{
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 .btn:active:not(:disabled){ transform: scale(0.98); }
 .btn:disabled{ opacity: 0.4; filter: grayscale(0.4); }

@@ -287,6 +287,33 @@ async function waitForPhase(game, phase, maxTicks) {
   return false;
 }
 
+// Mirrors script.js's warpedElapsed() (pacing-polish pass) so tests can
+// compute the real elapsed time needed to hit an exact target multiplier
+// under the new (slower-then-accelerating) flight curve. Deliberately
+// duplicated rather than imported — script.js has no exports — so if that
+// formula ever changes, this must be updated to match or these timing-
+// dependent tests will silently drift. `config` is CONFIG from the debug
+// hook (has GROWTH_RATE / FLIGHT_WARP_DELAY / FLIGHT_WARP_DECAY).
+function warpedElapsed(tSeconds, config) {
+  const A = config.FLIGHT_WARP_DELAY;
+  const B = config.FLIGHT_WARP_DECAY;
+  return tSeconds - A * (1 - Math.exp(-tSeconds / B));
+}
+
+// Numerically inverts the above (no closed form) via bisection: finds the
+// real elapsed seconds at which computeMultiplier() reads `target`.
+function timeToReachMultiplier(target, config) {
+  const targetWarped = Math.log(target) / config.GROWTH_RATE;
+  let lo = 0;
+  let hi = 120; // generous upper bound — warpedElapsed is strictly increasing
+  for (let i = 0; i < 100; i++) {
+    const mid = (lo + hi) / 2;
+    if (warpedElapsed(mid, config) < targetWarped) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
 async function runGameTests() {
   // ---- Exact 2.00x cashout ----
   {
@@ -298,10 +325,10 @@ async function runGameTests() {
     state.fairness.crashMultiplier = 50;
     game.el("mainActionBtn").click(); // place $10 bet
     // Advance past the countdown into RUNNING.
-    await waitForPhase(game, "running", 400);
+    await waitForPhase(game, "running", 550);
     const startMs = game.getClock();
     const target = 2.0;
-    const tForTarget = Math.log(target) / config.GROWTH_RATE; // seconds
+    const tForTarget = timeToReachMultiplier(target, config); // seconds
     game.setClock(startMs + tForTarget * 1000 - 16); // land just before, then one more tick
     game.tick(16);
     await game.settle();
@@ -328,9 +355,9 @@ async function runGameTests() {
     state.autoCashoutEnabled = true;
     state.autoCashoutValue = 3;
     game.el("mainActionBtn").click();
-    await waitForPhase(game, "running", 400);
+    await waitForPhase(game, "running", 550);
     const startMs = game.getClock();
-    const tForTarget = Math.log(3) / config.GROWTH_RATE;
+    const tForTarget = timeToReachMultiplier(3, config);
     game.setClock(startMs + tForTarget * 1000 + 32); // a bit past the target
     game.tick(16);
     await game.settle();
@@ -349,7 +376,7 @@ async function runGameTests() {
     state.crashPoint = 1.05;
     state.fairness.crashMultiplier = 1.05;
     game.el("mainActionBtn").click();
-    await waitForPhase(game, "running", 400);
+    await waitForPhase(game, "running", 550);
     await waitForPhase(game, "result", 400); // let it crash
     const betAfterCrash = state.bet;
     const balanceBeforeClick = state.balance;
@@ -372,11 +399,11 @@ async function runGameTests() {
     const crashPointBeforeBankHalf = state.fairness.crashMultiplier;
     const entropyHashBefore = state.fairness.entropyHash;
     game.el("mainActionBtn").click();
-    await waitForPhase(game, "running", 400);
+    await waitForPhase(game, "running", 550);
     const startMs = game.getClock();
 
     // Bank Half at 2.00x.
-    const t2 = Math.log(2) / config.GROWTH_RATE;
+    const t2 = timeToReachMultiplier(2, config);
     game.setClock(startMs + t2 * 1000 + 16);
     game.tick(16);
     await game.settle();
@@ -410,7 +437,7 @@ async function runGameTests() {
     );
 
     // Cash out the remaining $5 at 4.00x -> total should be $10 (banked) + $20 (remaining) = $30, net +$20.
-    const t4 = Math.log(4) / config.GROWTH_RATE;
+    const t4 = timeToReachMultiplier(4, config);
     game.setClock(startMs + t4 * 1000 + 16);
     game.tick(16);
     await game.settle();
@@ -432,9 +459,9 @@ async function runGameTests() {
     state.crashPoint = 2.5; // crashes shortly after the bank-half point
     state.fairness.crashMultiplier = 2.5;
     game.el("mainActionBtn").click();
-    await waitForPhase(game, "running", 400);
+    await waitForPhase(game, "running", 550);
     const startMs = game.getClock();
-    const t2 = Math.log(2) / config.GROWTH_RATE;
+    const t2 = timeToReachMultiplier(2, config);
     game.setClock(startMs + t2 * 1000 + 16);
     game.tick(16);
     await game.settle();
@@ -457,7 +484,7 @@ async function runGameTests() {
     state.fairness.crashMultiplier = 3.33;
     const committedRoundId = state.fairness.roundId;
     const committedCrash = state.fairness.crashMultiplier;
-    await waitForPhase(game, "running", 400);
+    await waitForPhase(game, "running", 550);
     // Once running, the committed value must still match what's about to
     // settle for every NPC and the player alike — there is exactly one
     // state.crashPoint / state.fairness object all of them read from.
@@ -470,9 +497,11 @@ async function runGameTests() {
     // chance to move each NPC to "cashed" before the shared crash point —
     // a single jump straight from t=0 to the crash instant would skip every
     // NPC's cash-out check entirely and make them all show "crash" even
-    // when their planned multiplier was comfortably below crashPoint. At
-    // GROWTH_RATE=0.1/s, reaching 3.33x takes ~12s of simulated time.
-    const tCrash = Math.log(3.33) / config.GROWTH_RATE; // seconds
+    // when their planned multiplier was comfortably below crashPoint.
+    // timeToReachMultiplier() accounts for the pacing-polish flight curve
+    // (slower early, easing back to full speed), which now takes noticeably
+    // longer than a plain exp(GROWTH_RATE*t) would suggest.
+    const tCrash = timeToReachMultiplier(3.33, config); // seconds
     for (let elapsedMs = 0; elapsedMs < tCrash * 1000 + 200 && state.phase === "running"; elapsedMs += 100) {
       game.tick(100);
       await game.settle();
