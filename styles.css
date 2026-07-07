@@ -581,8 +581,13 @@ kbd{
 .amount-input-wrap input:disabled{ color: var(--text-tertiary); }
 /* Auto-cashout field shows its placeholder (not a stale typed value) while
    toggled off — script.js clears .value on disable, so this is what's
-   actually visible: a dim example number, not a number that looks live. */
-.amount-input-wrap input::placeholder{ color: var(--text-tertiary); opacity: 1; }
+   actually visible: a dim example number, not a number that looks live.
+   Styling both ::placeholder AND :placeholder-shown (which dims the whole
+   input, not just the pseudo-element some engines under-render) so an
+   empty/example "2.00" reads as unmistakably inert at a glance, never
+   mistaken for an actual armed value the way the bold $10 stake reads. */
+.amount-input-wrap input::placeholder{ color: var(--text-tertiary); opacity: 0.6; }
+.amount-input-wrap input:placeholder-shown{ font-weight: 400; opacity: 0.6; }
 
 .quick-chips{ display: flex; gap: 6px; margin-top: 8px; }
 .chip{
