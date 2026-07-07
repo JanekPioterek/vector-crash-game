@@ -36,7 +36,9 @@
     STARTING_BALANCE: 1250.0,
     MIN_BET: 1,
     MAX_BET: 500,
-    HOUSE_EDGE: 0.04, // placeholder house edge, drives instant-crash probability
+    // RTP/house edge live in roundProvider.js (VECTOR-PF-v1) — this app
+    // never redefines them locally, so there is exactly one source of truth
+    // for the number that actually determines payouts.
     COUNTDOWN_SECONDS: 3.0,
     RESULT_DISPLAY_SECONDS: 2.6,
     GROWTH_RATE: 0.1, // exponential growth constant for the multiplier (per second)
@@ -106,10 +108,15 @@
     fairBadge: document.getElementById("fairBadge"),
     fairPopover: document.getElementById("fairPopover"),
     fairRound: document.getElementById("fairRound"),
-    fairSeed: document.getElementById("fairSeed"),
-    fairSeedRevealed: document.getElementById("fairSeedRevealed"),
-    fairEdge: document.getElementById("fairEdge"),
+    fairSeedHash: document.getElementById("fairSeedHash"),
+    fairRandomnessInput: document.getElementById("fairRandomnessInput"),
+    fairRandomnessRegen: document.getElementById("fairRandomnessRegen"),
+    fairRandomnessHint: document.getElementById("fairRandomnessHint"),
     fairResult: document.getElementById("fairResult"),
+    fairSeedRevealed: document.getElementById("fairSeedRevealed"),
+    fairEntropyHash: document.getElementById("fairEntropyHash"),
+    fairVerifyBtn: document.getElementById("fairVerifyBtn"),
+    fairVerifyStatus: document.getElementById("fairVerifyStatus"),
     soundToggle: document.getElementById("soundToggle"),
 
     howToPlayBtn: document.getElementById("howToPlayBtn"),
@@ -154,6 +161,7 @@
     partialCashoutBtn: document.getElementById("partialCashoutBtn"),
     mainActionBtn: document.getElementById("mainActionBtn"),
     mainActionLabel: document.getElementById("mainActionLabel"),
+    spaceHint: document.getElementById("spaceHint"),
 
     panelToggle: document.getElementById("panelToggle"),
     panelToggleLabel: document.getElementById("panelToggleLabel"),
@@ -182,9 +190,18 @@
     roundId: 0,
     phase: PHASE.COUNTDOWN,
 
-    crashPoint: null,
-    seedHash: null,
-    seed: null, // raw seed, revealed in the fair popover once the round resolves
+    crashPoint: null, // the number the game loop actually plays against; set the instant commit resolves
+    roundCommitReady: false, // gates COUNTDOWN -> RUNNING; see tick() and generateRound()
+    publicRandomnessOverride: null, // player-set value from the fairness popover input, applies to the round currently committing
+    cosmeticRng: null, // seeded PRNG for NPCs/backdrop only — never the crash point; see generateRound()
+
+    // The full VECTOR-PF-v1 record for the round currently in progress.
+    // Snapshotted by reference into each history entry (see pushHistory), so
+    // once a round settles its fairness object is shared between state.
+    // fairness and that history row — revealing the seed later updates both
+    // at once. See roundProvider.js for what each field means and how it's
+    // produced/verified.
+    fairness: null,
 
     roundStartTime: null, // ms, performance.now() at moment round begins
 
@@ -216,6 +233,10 @@
     // `triggered` fires the reminder at most once per session.
     guardrail: { enabled: false, threshold: 100, triggered: false, pending: false },
 
+    // One-time keyboard teach: shown only while Space would actually do
+    // something, gone for good the instant the player presses it once.
+    spaceHintUsed: false,
+
     npcs: [],
     history: [],
 
@@ -240,13 +261,29 @@
   let animRafId = null;
 
   /* ------------------------------------------------------------------ */
-  /* 4. Seeded RNG / round generation                                    */
+  /* 4. Round generation — provably fair (VECTOR-PF-v1) + cosmetic RNG   */
   /* ------------------------------------------------------------------ */
-  // Mulberry32 — small, fast, deterministic PRNG. Seeded fresh each round so
-  // the crash point is fully determined before the round starts and cannot
-  // be influenced by any in-round player action.
-  function createRng(seed) {
-    let t = seed >>> 0;
+  // The crash multiplier itself is generated, committed, revealed and
+  // independently verifiable entirely via roundProvider.js — this file
+  // never touches crypto or randomness for that number. See that file's
+  // header for the full RoundProvider contract (commitRound/revealRound)
+  // and why LocalDemoAdapter is explicitly NOT the same thing as a real
+  // backend, even though the maths it runs is identical to VECTOR-PF-v1.
+  const RTP = window.VectorRoundProvider.RTP;
+  const HOUSE_EDGE = window.VectorRoundProvider.HOUSE_EDGE;
+  const CALCULATION_VERSION = window.VectorRoundProvider.CALCULATION_VERSION;
+  // Swap this one line for `new window.VectorRoundProvider.ServerAdapter()`
+  // once real backend endpoints exist — nothing else in this file changes.
+  const roundProvider = new window.VectorRoundProvider.LocalDemoAdapter();
+
+  // Mulberry32 — small, fast PRNG, reseeded every round from Math.random().
+  // This is COSMETIC ONLY: NPC bot names/amounts/behaviour and the drifting
+  // background nebulae. It has no bearing whatsoever on the crash
+  // multiplier and is never used for anything a payout depends on — that
+  // is the entire reason it's kept separate from roundProvider.js rather
+  // than reusing the server seed for "free" determinism.
+  function createCosmeticRng() {
+    let t = (Math.random() * 0xffffffff) >>> 0;
     return function () {
       t += 0x6d2b79f5;
       let x = t;
@@ -256,81 +293,61 @@
     };
   }
 
-  function makeSeed(roundId) {
-    // Simulates a server seed. In a real system this would be a committed
-    // hash revealed after the round for verification.
-    const raw = Date.now() ^ Math.imul(roundId + 1, 2654435761);
-    return raw >>> 0;
-  }
-
-  function fakeHash(seed) {
-    // Fallback only, used when the Web Crypto API isn't available (very old
-    // browsers, or a non-secure context where crypto.subtle is withheld).
-    // Cosmetic — not a real digest, just visually hash-shaped.
-    const s = seed.toString(16).padStart(8, "0");
-    return `0x${s}${s.split("").reverse().join("")}`.slice(0, 24) + "…";
-  }
-
-  // Real SHA-256 commit for the round's seed via the Web Crypto API. This is
-  // an actual cryptographic digest, not a cosmetic stand-in: a player who
-  // doesn't trust the client can take the raw seed revealed after the round
-  // resolves, hash it themselves (SHA-256 of the seed's decimal string), and
-  // confirm it matches what was shown here *before* the round started. What
-  // this still doesn't provide — because there's no backend in this
-  // prototype — is a hash published somewhere the client itself can't have
-  // silently swapped after the fact; see the fair-popover note and
-  // VECTOR_FABLE_REVIEW.md for the honest distinction.
-  async function computeSeedHash(seed) {
-    try {
-      const subtle = window.crypto && window.crypto.subtle;
-      if (!subtle) return fakeHash(seed);
-      const data = new TextEncoder().encode(String(seed));
-      const digest = await subtle.digest("SHA-256", data);
-      const bytes = Array.from(new Uint8Array(digest));
-      return "0x" + bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
-    } catch (err) {
-      console.error("[VECTOR] SHA-256 commit failed, falling back:", err);
-      return fakeHash(seed);
-    }
-  }
-
-  // Standard crash-curve distribution: a house-edge chunk forces frequent
-  // instant (1.00x) crashes, otherwise crash point follows a heavy-tailed
-  // 1/(1-r) curve — lots of low multipliers, some mid-range, rare extremes.
-  function generateCrashPoint(rng, houseEdge) {
-    if (rng() < houseEdge) return 1.0;
-    const r = rng();
-    let crash = 0.99 / (1 - r);
-    crash = Math.min(crash, CONFIG.MAX_VISIBLE_MULTIPLIER);
-    crash = Math.max(1.0, crash);
-    return Math.floor(crash * 100) / 100;
-  }
-
+  // Kicks off the real provably-fair commit for this round: a fresh server
+  // seed is generated, its SHA-256 hash and this round's public randomness
+  // are made available immediately (see state.fairness), and the crash
+  // multiplier is derived via HMAC-SHA256(serverSeed, "VECTOR:roundId:
+  // publicRandomness") per VECTOR-PF-v1 — fixed now, before betting closes,
+  // never touched again. This is async (real Web Crypto calls); state.
+  // roundCommitReady flips true once it resolves, and tick() will not let
+  // the round leave COUNTDOWN until it does (in practice this resolves in
+  // low single-digit milliseconds — invisible against a 3 second countdown).
+  // NPCs and the backdrop are regenerated synchronously below, independent
+  // of this promise, since they have no reason to wait on real crypto.
   function generateRound() {
     state.roundId += 1;
-    const seed = makeSeed(state.roundId);
-    const rng = createRng(seed);
-    state.crashPoint = generateCrashPoint(rng, CONFIG.HOUSE_EDGE);
-    state.seed = seed;
-    // Real SHA-256 is async; show a neutral placeholder for the handful of
-    // milliseconds before it resolves (a 3s countdown makes this a non-issue
-    // in practice), and refresh the popover in place if it's already open.
-    const thisRoundId = state.roundId;
-    state.seedHash = "committing…";
-    computeSeedHash(seed).then((hash) => {
-      if (state.roundId !== thisRoundId) return; // stale — a newer round already started
-      state.seedHash = hash;
-      if (el.fairPopover && !el.fairPopover.hidden) el.fairSeed.textContent = hash;
-    });
-    // Reserve extra rng draws for NPC planned-cashout generation so NPC
-    // behaviour is also pre-determined and independent of the crash point.
-    state._rng = rng;
-    regenerateEnvironmentForRound(rng);
+    const roundId = state.roundId;
+
+    state.roundCommitReady = false;
+    state.fairness = {
+      roundId,
+      serverSeedHash: null,
+      serverSeed: null,
+      publicRandomness: null,
+      entropyHash: null,
+      crashMultiplier: null,
+      rtp: RTP,
+      houseEdge: HOUSE_EDGE,
+      calculationVersion: CALCULATION_VERSION,
+      revealed: false,
+    };
+
+    roundProvider
+      .commitRound(roundId, state.publicRandomnessOverride)
+      .then((committed) => {
+        if (state.roundId !== roundId || state.fairness.roundId !== roundId) return; // stale
+        state.fairness.serverSeedHash = committed.serverSeedHash;
+        state.fairness.publicRandomness = committed.publicRandomness;
+        state.fairness.entropyHash = committed.entropyHash;
+        state.fairness.crashMultiplier = committed.crashMultiplier;
+        state.crashPoint = committed.crashMultiplier;
+        state.roundCommitReady = true;
+        renderFairPopover();
+      })
+      .catch((err) => {
+        // Fail safe, not fail silent: without Web Crypto there is no honest
+        // way to generate a real-outcome number, so the round simply never
+        // becomes ready rather than quietly falling back to Math.random().
+        console.error("[VECTOR] round commit failed — betting cannot proceed safely:", err);
+      });
+
+    state.cosmeticRng = createCosmeticRng();
+    regenerateEnvironmentForRound(state.cosmeticRng);
   }
 
-  // Background nebulae and the pulsar re-seed each round from the same rng
-  // that generates the crash point — purely cosmetic, but it keeps the
-  // backdrop from looking identical round after round.
+  // Background nebulae and the pulsar re-seed each round from the cosmetic
+  // RNG above — purely decorative, keeps the backdrop from looking
+  // identical round after round, no connection to the crash multiplier.
   function regenerateEnvironmentForRound(rng) {
     const nebulae = [];
     for (let i = 0; i < 2; i++) {
@@ -341,6 +358,7 @@
         hueTilt: rng() < 0.5 ? -1 : 1,
         driftVx: (rng() - 0.5) * 0.003,
         driftVy: (rng() - 0.5) * 0.0015,
+        driftAccum: 0, // speed-weighted elapsed time, integrated each frame in drawNebulae
       });
     }
     state.env.nebulae = nebulae;
@@ -448,6 +466,19 @@
     flashCrash();
     playSound("crash");
 
+    // Reveal the server seed now that the round has actually settled — the
+    // crash multiplier itself was already fixed at commit time (start of
+    // countdown); this only unlocks the data needed to verify it after the
+    // fact. `fairness` is the same object referenced by the history row
+    // pushHistory just recorded, so both update the instant this resolves.
+    const fairness = state.fairness;
+    roundProvider.revealRound(fairness.roundId).then((revealed) => {
+      if (!revealed || fairness.roundId !== revealed.roundId) return;
+      fairness.serverSeed = revealed.serverSeed;
+      fairness.revealed = true;
+      renderFairPopover();
+    });
+
     renderAll();
   }
 
@@ -469,7 +500,11 @@
       if (state.phase === PHASE.COUNTDOWN) {
         const remaining = Math.max(0, state.countdownEndTime - now);
         renderCountdown(remaining);
-        if (remaining <= 0) beginRound();
+        // Never leaves COUNTDOWN before the round's crash multiplier is
+        // actually committed (see generateRound/roundCommitReady) — in
+        // practice the real Web Crypto calls resolve in low single-digit
+        // milliseconds, so this never visibly extends the countdown.
+        if (remaining <= 0 && state.roundCommitReady) beginRound();
       } else if (state.phase === PHASE.RUNNING) {
         const m = computeMultiplier(now);
         // Auto-cashout settles at EXACTLY its target multiplier, and is
@@ -760,7 +795,7 @@
   }
 
   function generateNpcs() {
-    const rng = state._rng;
+    const rng = state.cosmeticRng;
     const npcMin = FEATURE_FLEET_TABLE ? CONFIG.NPC_MIN_FLEET : CONFIG.NPC_MIN_MVP;
     const npcMax = FEATURE_FLEET_TABLE ? CONFIG.NPC_MAX_FLEET : CONFIG.NPC_MAX_MVP;
     const count = npcMin + Math.floor(rng() * (npcMax - npcMin + 1));
@@ -844,6 +879,10 @@
       crashPoint,
       playerNet,
       time: new Date(),
+      // Same object state.fairness points at — triggerCrash's revealRound()
+      // mutates it in place once the seed comes back, so this history row's
+      // Verify button sees the reveal too without any extra bookkeeping.
+      fairness: state.fairness,
     });
     if (state.history.length > CONFIG.HISTORY_LENGTH) {
       state.history.length = CONFIG.HISTORY_LENGTH;
@@ -880,6 +919,7 @@
     renderMultiplier();
     renderMainButton();
     renderPartialButton();
+    renderSpaceHint();
     renderResultBanner();
     renderAutoPill();
     renderCountdownVisibility();
@@ -1088,6 +1128,36 @@
     }
   }
 
+  // One-time keyboard teach, rendered as a quiet "SPACE" tag in the main
+  // button's own corner (see .space-tag) rather than a separate hint row.
+  // Mirrors the exact branching in the mainActionBtn click handler (see
+  // wireInputs) so it's only ever visible when Space would genuinely do
+  // something — never shown against a disabled/readout state where
+  // pressing it is a no-op. Permanently dismissed (state.spaceHintUsed)
+  // the instant the player presses Space for the first time; see the
+  // keydown handler.
+  function renderSpaceHint() {
+    if (!el.spaceHint) return;
+    if (state.spaceHintUsed) {
+      el.spaceHint.classList.remove("is-visible");
+      return;
+    }
+
+    const amount = clampBetAmount(Number(el.betAmountInput.value));
+    const canAffordAmount = amount <= state.balance;
+    let active = false;
+
+    if (state.phase === PHASE.COUNTDOWN && !state.bet) {
+      active = canAffordAmount;
+    } else if (state.phase === PHASE.RUNNING && state.bet && !state.bet.resolved) {
+      active = true;
+    } else if ((state.phase === PHASE.RUNNING || state.phase === PHASE.RESULT) && !state.bet) {
+      active = state.queuedBet != null || canAffordAmount;
+    }
+
+    el.spaceHint.classList.toggle("is-visible", active);
+  }
+
   function renderResultBanner() {
     const banner = el.resultBanner;
     if (state.phase !== PHASE.RESULT) {
@@ -1173,7 +1243,7 @@
     // Self-healing: a live round should never have zero NPCs. If it
     // somehow does (whatever the cause), regenerate right here rather
     // than leaving the panel empty for the rest of the round.
-    if ((state.phase === PHASE.COUNTDOWN || state.phase === PHASE.RUNNING) && state.npcs.length === 0 && state._rng) {
+    if ((state.phase === PHASE.COUNTDOWN || state.phase === PHASE.RUNNING) && state.npcs.length === 0 && state.cosmeticRng) {
       try {
         generateNpcs();
       } catch (err) {
@@ -1241,13 +1311,79 @@
           net == null
             ? ""
             : `<span class="history-net ${net >= 0 ? "pos" : "neg"}">${net >= 0 ? "+" : "−"}${formatMoney(Math.abs(net))}</span>`;
-        return `<li class="history-row">
+        return `<li class="history-row" data-round-id="${h.id}">
           <span class="history-chip tier-${tier}">${formatMult(h.crashPoint)}</span>
           ${netHtml}
           <span class="history-time">${time}</span>
+          <button type="button" class="history-verify-btn" data-round-id="${h.id}">Verify</button>
         </li>`;
       })
       .join("");
+  }
+
+  // Renders the Fairness popover from state.fairness / state.phase. Called
+  // whenever a round commits or reveals (even while the popover is closed —
+  // cheap DOM writes to hidden elements) and again the moment the badge is
+  // opened, so it's never stale. The actual crash multiplier is withheld
+  // from #fairResult until the round has genuinely settled (fairness.
+  // revealed), even though it was already fixed at commit time — showing it
+  // early would spoil the round, not just prove fairness.
+  function renderFairPopover() {
+    if (!el.fairPopover) return;
+    const f = state.fairness;
+
+    if (el.fairRound) el.fairRound.textContent = f ? `#${f.roundId}` : "—";
+    if (el.fairSeedHash) el.fairSeedHash.textContent = f && f.serverSeedHash ? f.serverSeedHash : "Pending…";
+
+    // Never stomp on what the player is actively typing.
+    if (el.fairRandomnessInput && document.activeElement !== el.fairRandomnessInput) {
+      el.fairRandomnessInput.value = f && f.publicRandomness ? f.publicRandomness : "";
+    }
+    if (el.fairRandomnessHint) {
+      el.fairRandomnessHint.textContent = state.publicRandomnessOverride
+        ? "Custom randomness set — applies starting next round"
+        : "";
+    }
+
+    if (el.fairResult) {
+      el.fairResult.textContent =
+        f && f.revealed && f.crashMultiplier != null ? formatMult(f.crashMultiplier) : "Pending — locked in";
+    }
+    if (el.fairSeedRevealed) {
+      el.fairSeedRevealed.textContent = f && f.revealed ? f.serverSeed : "Revealed after round settles";
+    }
+    if (el.fairEntropyHash) {
+      el.fairEntropyHash.textContent = f && f.revealed ? f.entropyHash : "—";
+    }
+    if (el.fairVerifyBtn) el.fairVerifyBtn.disabled = !(f && f.revealed);
+    if (el.fairVerifyStatus && !(f && f.revealed)) {
+      el.fairVerifyStatus.hidden = true;
+      el.fairVerifyStatus.className = "fair-verify-status";
+    }
+  }
+
+  // Shared by the live Verify Round button and each history row's Verify
+  // link — runs window.VectorRoundProvider.verifyRound() against whatever
+  // fairness snapshot it's handed and paints the result into a status node.
+  // `baseClass` lets callers use their own compact styling (history rows)
+  // instead of the popover's full-width status bar.
+  async function runFairnessVerification(fairness, statusEl, baseClass) {
+    if (!statusEl) return;
+    const cls = baseClass || "fair-verify-status";
+    statusEl.hidden = false;
+    statusEl.className = `${cls} is-checking`;
+    statusEl.textContent = "Checking…";
+    const result = await window.VectorRoundProvider.verifyRound(fairness);
+    const labels = {
+      verified: "Verified",
+      missing: "Missing fairness data",
+      seed_hash_mismatch: "Seed hash mismatch",
+      entropy_mismatch: "Entropy mismatch",
+      crash_mismatch: "Crash result mismatch",
+    };
+    statusEl.textContent = labels[result.reason] || "Verification failed";
+    statusEl.className = `${cls} ${result.ok ? "is-verified" : result.reason === "missing" ? "is-missing" : "is-mismatch"}`;
+    return result;
   }
 
   // Compact strip of recent crash points above the betting panel — the
@@ -1546,11 +1682,17 @@
     ctx.beginPath(); ctx.arc(x, y, 1.6 + breathe, 0, Math.PI * 2); ctx.fill();
   }
 
-  function drawNebulae(now, palette) {
+  // Drift is integrated per-frame (driftAccum += dt * speed) rather than
+  // derived straight from absolute time, so the same `speed` signal that
+  // drives the dust particles and vignette — base idle rate plus
+  // log(multiplier) growth, see currentSpeedFactor — also governs how fast
+  // the backdrop itself slides past. Bigger multiplier reads as faster
+  // everywhere in the scene, not just in the foreground streaks.
+  function drawNebulae(dt, speed, palette) {
     for (const n of state.env.nebulae) {
-      const drift = prefersReducedMotion ? 0 : now / 1000;
-      const x = (n.x + n.driftVx * drift) * cw;
-      const y = (n.y + n.driftVy * drift) * ch;
+      if (!prefersReducedMotion) n.driftAccum += dt * speed;
+      const x = (n.x + n.driftVx * n.driftAccum) * cw;
+      const y = (n.y + n.driftVy * n.driftAccum) * ch;
       const r = n.r * Math.max(cw, ch);
       const tint = n.hueTilt > 0 ? { r: 180, g: 107, b: 255 } : palette;
       const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
@@ -1580,9 +1722,13 @@
       rotSpeed: (Math.random() - 0.5) * 0.15,
     };
   }
-  function drawDebris(dt) {
+  // Same speed-coupling as drawNebulae: debris drifts noticeably faster as
+  // the multiplier climbs (speed > 1 once log(multiplier) growth kicks in)
+  // and slows back to a lazy idle drift during countdown/result, matching
+  // whatever the dust particles and vignette are doing at that instant.
+  function drawDebris(dt, speed) {
     for (const d of state.env.debris) {
-      d.x += d.vx * dt * (prefersReducedMotion ? 0.2 : 1);
+      d.x += d.vx * dt * speed * (prefersReducedMotion ? 0.2 : 1);
       d.rot += d.rotSpeed * dt;
       if (d.x < -40 || d.x > cw + 40) Object.assign(d, spawnDebris(false));
       ctx.save();
@@ -1659,12 +1805,15 @@
     }
   }
 
-  function drawEnvironment(now, palette, vp, dt) {
+  function drawEnvironment(now, palette, vp, dt, speed) {
     drawStars(now);
     drawConstellations();
+    // Pulsar deliberately does NOT take `speed` — it's a calm, independent
+    // counterpoint that never reacts to the round, unlike everything else
+    // in this function (see drawPulsar's own comment).
     drawPulsar(now);
-    drawNebulae(now, palette);
-    drawDebris(dt);
+    drawNebulae(dt, speed, palette);
+    drawDebris(dt, speed);
     updateStorm(now);
     drawStorm(vp, now, palette);
   }
@@ -1734,7 +1883,7 @@
     const ship = shipAnchor();
 
     ctx.clearRect(0, 0, cw, ch);
-    drawEnvironment(now, palette, vp, dt);
+    drawEnvironment(now, palette, vp, dt, speed);
 
     // One-shot camera punch on cashout only — zero the rest of the time.
     // This is deliberately strong: it's the main signal that the ship is
@@ -2308,6 +2457,16 @@
       state.autoCashoutEnabled = !state.autoCashoutEnabled;
       el.autoCashoutToggle.setAttribute("aria-checked", String(state.autoCashoutEnabled));
       el.autoCashoutValue.disabled = !state.autoCashoutEnabled;
+      // While off, the field shows its placeholder rather than a leftover
+      // typed value — a blank, disabled-looking field reads as genuinely
+      // off; a filled one reads as still armed. The real target stays in
+      // state.autoCashoutValue regardless, so nothing is lost by clearing
+      // the visible value here.
+      if (state.autoCashoutEnabled) {
+        el.autoCashoutValue.value = state.autoCashoutValue.toFixed(2);
+      } else {
+        el.autoCashoutValue.value = "";
+      }
       renderAutoPill();
     });
     el.autoCashoutValue.addEventListener("input", () => {
@@ -2418,6 +2577,13 @@
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       if (e.code === "Space") {
         e.preventDefault();
+        // The hint has done its job the instant Space is pressed once —
+        // dismiss it here (fades via CSS) rather than waiting on whatever
+        // renderAll() the resulting action happens to trigger.
+        if (!state.spaceHintUsed) {
+          state.spaceHintUsed = true;
+          renderSpaceHint();
+        }
         el.mainActionBtn.click();
       }
     });
@@ -2427,26 +2593,7 @@
       const willOpen = el.fairPopover.hidden;
       el.fairPopover.hidden = !willOpen;
       el.fairBadge.setAttribute("aria-expanded", String(willOpen));
-      if (willOpen) {
-        el.fairRound.textContent = `#${state.roundId}`;
-        el.fairSeed.textContent = state.seedHash || "—";
-        // Commit-reveal shape, honestly simulated: the hash is shown
-        // before the round, the raw seed only once the round resolves.
-        if (el.fairSeedRevealed) {
-          el.fairSeedRevealed.textContent =
-            state.phase === PHASE.RESULT && state.seed != null
-              ? `0x${state.seed.toString(16).padStart(8, "0")}`
-              : "Revealed after round";
-        }
-        // Computed from CONFIG so this display can never drift from the
-        // actual maths: (1 - instant-crash share) x the curve's 0.99.
-        if (el.fairEdge) {
-          const rtp = (1 - CONFIG.HOUSE_EDGE) * 0.99;
-          el.fairEdge.textContent = `${((1 - rtp) * 100).toFixed(1)}% (RTP ${(rtp * 100).toFixed(1)}%)`;
-        }
-        el.fairResult.textContent =
-          state.phase === PHASE.RESULT ? formatMult(state.crashPoint) : "Pending — locked in";
-      }
+      if (willOpen) renderFairPopover();
     });
     document.addEventListener("click", (e) => {
       if (!el.fairPopover.hidden && !el.fairBadge.contains(e.target) && !el.fairPopover.contains(e.target)) {
@@ -2454,6 +2601,53 @@
         el.fairBadge.setAttribute("aria-expanded", "false");
       }
     });
+
+    // Player-editable public randomness ("client seed"). The round in
+    // progress already committed the instant its countdown started (see
+    // generateRound), so a value typed here can't touch that round's
+    // already-published commitment — it's queued as the override for
+    // whichever round commits next. Empty input clears the override, back
+    // to an auto-generated value each round.
+    if (el.fairRandomnessInput) {
+      el.fairRandomnessInput.addEventListener("change", () => {
+        const v = el.fairRandomnessInput.value.trim();
+        state.publicRandomnessOverride = v.length > 0 ? v : null;
+        renderFairPopover();
+      });
+    }
+    if (el.fairRandomnessRegen) {
+      el.fairRandomnessRegen.addEventListener("click", () => {
+        const fresh = window.VectorRoundProvider.randomHex(16);
+        state.publicRandomnessOverride = fresh;
+        if (el.fairRandomnessInput) el.fairRandomnessInput.value = fresh;
+        renderFairPopover();
+      });
+    }
+    if (el.fairVerifyBtn) {
+      el.fairVerifyBtn.addEventListener("click", () => {
+        if (state.fairness && state.fairness.revealed) {
+          runFairnessVerification(state.fairness, el.fairVerifyStatus);
+        }
+      });
+    }
+
+    // Delegated so it keeps working across renderHistory()'s innerHTML
+    // rebuilds — each button carries the round id it verifies against.
+    if (el.historyList) {
+      el.historyList.addEventListener("click", (e) => {
+        const btn = e.target.closest(".history-verify-btn");
+        if (!btn) return;
+        const roundId = Number(btn.dataset.roundId);
+        const entry = state.history.find((h) => h.id === roundId);
+        if (!entry || !entry.fairness) return;
+        btn.hidden = true;
+        const status = document.createElement("span");
+        status.className = "history-verify-status is-checking";
+        status.textContent = "Checking…";
+        btn.insertAdjacentElement("afterend", status);
+        runFairnessVerification(entry.fairness, status, "history-verify-status");
+      });
+    }
 
     el.soundToggle.addEventListener("click", () => {
       state.soundOn = !state.soundOn;

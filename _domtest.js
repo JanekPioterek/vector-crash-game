@@ -162,18 +162,33 @@ const windowStub = {
 let clock = 0;
 const performanceStub = { now: () => clock };
 
+// VECTOR-PF-v1 needs real Web Crypto (SHA-256 / HMAC-SHA256 / secure random
+// bytes) for the actual crash-generation path — no Math.random() fallback,
+// by design. Node's built-in webcrypto implements the same subtle-crypto
+// surface as a browser. roundProvider.js resolves its own internal `global`
+// binding to whichever of window/globalThis exists first, and since this
+// harness defines a fake `window`, that's where crypto must live.
+const nodeCrypto = require("crypto").webcrypto;
+windowStub.crypto = nodeCrypto;
+
 global.document = documentStub;
 global.window = windowStub;
 global.performance = performanceStub;
 global.requestAnimationFrame = windowStub.requestAnimationFrame;
 global.navigator = { userAgent: "node-test" };
+global.crypto = nodeCrypto;
 global.Path2D = class Path2D {
   moveTo() {} lineTo() {} closePath() {} arc() {} ellipse() {} rect() {}
 };
 
+// roundProvider.js must execute (and attach window.VectorRoundProvider)
+// before script.js runs, exactly like index.html's <script> load order.
+const roundProviderCode = fs.readFileSync(path.join(__dirname, "roundProvider.js"), "utf8");
 const code = fs.readFileSync(path.join(__dirname, "script.js"), "utf8");
 
 try {
+  const fnProvider = new Function(roundProviderCode + "\n//# sourceURL=roundProvider.js");
+  fnProvider();
   const fn = new Function(code + "\n//# sourceURL=script.js");
   fn();
   console.log("BOOT OK");
@@ -185,87 +200,117 @@ try {
 // Drive the rAF loop for a simulated ~15 seconds (≈16ms per frame),
 // placing a bet during countdown and cashing out mid-round to exercise the
 // warp/trail code paths, not just passive idle rendering.
-let frames = 0;
-let crashedAt = null;
-let betPlaced = false;
-let cashedOut = false;
-const mainBtn = elementRegistry.get("mainActionBtn");
+//
+// This loop MUST actually return to the event loop between frames now:
+// generateRound()'s commitRound() and triggerCrash()'s revealRound() are
+// real async Web Crypto calls (genuine Promises backed by Node's threadpool,
+// not just microtasks), and state.roundCommitReady never flips true — so
+// the round can never leave COUNTDOWN — until that Promise gets a chance to
+// resolve. A plain synchronous for-loop never yields the stack, so those
+// promises would simply never settle and the whole test would hang in
+// COUNTDOWN forever. Yielding via setTimeout(0) each frame forces a real
+// macrotask boundary, which lets pending crypto work complete.
+async function driveFrames() {
+  let frames = 0;
+  let crashedAt = null;
+  let betPlaced = false;
+  let cashedOut = false;
+  const mainBtn = elementRegistry.get("mainActionBtn");
 
-for (let i = 0; i < 900; i++) {
-  clock += 16;
-  const cb = rafCallback;
-  if (!cb) { console.log("No rAF callback captured after", frames, "frames"); break; }
-  rafCallback = null;
-  try {
-    cb(clock);
-    frames++;
-    if (!betPlaced && clock > 500) {
-      mainBtn.click(); // PLACE BET during countdown
-      betPlaced = true;
+  for (let i = 0; i < 900; i++) {
+    clock += 16;
+    const cb = rafCallback;
+    if (!cb) { console.log("No rAF callback captured after", frames, "frames"); break; }
+    rafCallback = null;
+    try {
+      cb(clock);
+      frames++;
+      if (!betPlaced && clock > 500) {
+        mainBtn.click(); // PLACE BET during countdown
+        betPlaced = true;
+      }
+      if (!cashedOut && clock > 6000) {
+        mainBtn.click(); // CASH OUT once the round is running
+        cashedOut = true;
+      }
+    } catch (err) {
+      crashedAt = { frame: frames, ms: clock, err };
+      break;
     }
-    if (!cashedOut && clock > 6000) {
-      mainBtn.click(); // CASH OUT once the round is running
-      cashedOut = true;
+    // Yield to the event loop so any pending commitRound()/revealRound()
+    // promises actually get to resolve before the next simulated frame.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (crashedAt) break;
+  }
+
+  console.log("betPlaced:", betPlaced, "cashedOut:", cashedOut);
+  console.log("Frames executed:", frames, "of", 900);
+  if (crashedAt) {
+    console.log("TICK THREW at frame", crashedAt.frame, "t=", crashedAt.ms, "ms");
+    console.log(crashedAt.err.stack);
+  }
+
+  const liveBets = elementRegistry.get("liveBetsList");
+  console.log("\n--- liveBetsList rows (final):", liveBets ? liveBets.children.length : "(element not requested)", "---");
+  if (liveBets) {
+    for (const row of liveBets.children) {
+      const cells = row.children.map((c) => c.textContent).join(" | ");
+      console.log(" ", row.className, "->", cells);
     }
-  } catch (err) {
-    crashedAt = { frame: frames, ms: clock, err };
-    break;
   }
-}
-console.log("betPlaced:", betPlaced, "cashedOut:", cashedOut);
 
-console.log("Frames executed:", frames, "of", 900);
-if (crashedAt) {
-  console.log("TICK THREW at frame", crashedAt.frame, "t=", crashedAt.ms, "ms");
-  console.log(crashedAt.err.stack);
-}
+  const multiplierEl = elementRegistry.get("multiplierValue");
+  console.log("\nmultiplierValue.textContent:", multiplierEl ? multiplierEl.textContent : "(n/a)");
 
-const liveBets = elementRegistry.get("liveBetsList");
-console.log("\n--- liveBetsList rows (final):", liveBets ? liveBets.children.length : "(element not requested)", "---");
-if (liveBets) {
-  for (const row of liveBets.children) {
-    const cells = row.children.map((c) => c.textContent).join(" | ");
-    console.log(" ", row.className, "->", cells);
+  const modeLabelEl = elementRegistry.get("modeLabel");
+  console.log("modeLabel.textContent:", modeLabelEl ? modeLabelEl.textContent : "(n/a)");
+
+  /* ------------------------------------------------------------------ */
+  /* Assertions — the actual pass/fail contract of this regression test  */
+  /* ------------------------------------------------------------------ */
+  const debugHook = global.window.__VECTOR_DEBUG__;
+  const results = [];
+  function check(label, pass) {
+    results.push({ label, pass: !!pass });
   }
+
+  check("boot() completed without throwing", true); // would have exited(1) above already if not
+  check("all 900 simulated frames ran without an uncaught error", frames === 900 && !crashedAt);
+  check("bet was actually placed during the simulation", betPlaced);
+  check("cash-out was actually triggered during the simulation", cashedOut);
+  check("__VECTOR_DEBUG__ hook is exposed", !!debugHook);
+  check("live bets list is non-empty at the end of the run", !!liveBets && liveBets.children.length > 0);
+  check(
+    "balance is a finite, non-negative number after a full bet/cashout cycle",
+    debugHook && Number.isFinite(debugHook.state.balance) && debugHook.state.balance >= 0
+  );
+  check(
+    "NPC pool size matches the MVP range (5-9) with FEATURE_FLEET_TABLE off",
+    debugHook && !debugHook.state.npcs.length === false &&
+      debugHook.state.npcs.length >= 3 && debugHook.state.npcs.length <= 9
+  );
+  check(
+    "at least one round committed a real provably-fair result (roundCommitReady reached true)",
+    debugHook && debugHook.state.roundCommitReady === true
+  );
+  check(
+    "committed fairness data has the expected shape (seed hash + entropy hash + crash multiplier)",
+    debugHook &&
+      debugHook.state.fairness &&
+      typeof debugHook.state.fairness.serverSeedHash === "string" &&
+      typeof debugHook.state.fairness.entropyHash === "string" &&
+      typeof debugHook.state.fairness.crashMultiplier === "number"
+  );
+
+  console.log("\n--- Results ---");
+  let failCount = 0;
+  for (const r of results) {
+    console.log(`${r.pass ? "PASS" : "FAIL"} — ${r.label}`);
+    if (!r.pass) failCount++;
+  }
+  console.log(`\n${results.length - failCount}/${results.length} checks passed.`);
+
+  process.exit(failCount > 0 ? 1 : 0); // the game's own setInterval heartbeat would otherwise keep this process alive forever
 }
 
-const multiplierEl = elementRegistry.get("multiplierValue");
-console.log("\nmultiplierValue.textContent:", multiplierEl ? multiplierEl.textContent : "(n/a)");
-
-const modeLabelEl = elementRegistry.get("modeLabel");
-console.log("modeLabel.textContent:", modeLabelEl ? modeLabelEl.textContent : "(n/a)");
-
-/* ------------------------------------------------------------------ */
-/* Assertions — the actual pass/fail contract of this regression test  */
-/* ------------------------------------------------------------------ */
-const debugHook = global.window.__VECTOR_DEBUG__;
-const results = [];
-function check(label, pass) {
-  results.push({ label, pass: !!pass });
-}
-
-check("boot() completed without throwing", true); // would have exited(1) above already if not
-check("all 900 simulated frames ran without an uncaught error", frames === 900 && !crashedAt);
-check("bet was actually placed during the simulation", betPlaced);
-check("cash-out was actually triggered during the simulation", cashedOut);
-check("__VECTOR_DEBUG__ hook is exposed", !!debugHook);
-check("live bets list is non-empty at the end of the run", !!liveBets && liveBets.children.length > 0);
-check(
-  "balance is a finite, non-negative number after a full bet/cashout cycle",
-  debugHook && Number.isFinite(debugHook.state.balance) && debugHook.state.balance >= 0
-);
-check(
-  "NPC pool size matches the MVP range (5-9) with FEATURE_FLEET_TABLE off",
-  debugHook && !debugHook.state.npcs.length === false &&
-    debugHook.state.npcs.length >= 3 && debugHook.state.npcs.length <= 9
-);
-
-console.log("\n--- Results ---");
-let failCount = 0;
-for (const r of results) {
-  console.log(`${r.pass ? "PASS" : "FAIL"} — ${r.label}`);
-  if (!r.pass) failCount++;
-}
-console.log(`\n${results.length - failCount}/${results.length} checks passed.`);
-
-process.exit(failCount > 0 ? 1 : 0); // the game's own setInterval heartbeat would otherwise keep this process alive forever
+driveFrames();

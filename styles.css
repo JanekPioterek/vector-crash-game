@@ -130,6 +130,11 @@ input[type=number]{ -moz-appearance: textfield; }
   letter-spacing: 0.18em;
   color: var(--text-primary);
 }
+/* Round metadata row: the fairness badge sits beside the recent-rounds
+   strip below the game canvas — both are "round status" indicators, kept
+   out of the header and out of the betting controls per the fairness spec. */
+.stage-meta-row{ display: flex; align-items: center; gap: 10px; }
+.fair-badge-wrap{ position: relative; flex-shrink: 0; }
 .fair-badge{
   display: inline-flex;
   align-items: center;
@@ -142,16 +147,18 @@ input[type=number]{ -moz-appearance: textfield; }
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
+  white-space: nowrap;
   transition: border-color .15s var(--ease-out), color .15s var(--ease-out);
 }
-.fair-badge svg{ color: var(--success-1); }
+.fair-badge svg{ color: var(--success-1); flex-shrink: 0; }
 .fair-badge:hover{ color: var(--text-primary); border-color: var(--border-strong); }
 
 .fair-popover{
   position: absolute;
   top: calc(100% + 10px);
   left: 0;
-  width: 280px;
+  width: 320px;
+  max-width: calc(100vw - 40px);
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
@@ -160,10 +167,84 @@ input[type=number]{ -moz-appearance: textfield; }
   z-index: 50;
 }
 .fair-popover-title{ font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--text-primary); }
-.fair-popover dl{ display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 10px 0; }
+.fair-popover-section-title{
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: 12px 0 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+.fair-popover dl{ display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 10px 0; align-items: center; }
 .fair-popover dt{ font-size: 11px; color: var(--text-tertiary); }
 .fair-popover dd{ margin: 0; font-size: 11px; font-family: var(--font-mono); color: var(--text-secondary); word-break: break-all; text-align: right; }
-.fair-popover-note{ font-size: 10.5px; line-height: 1.5; color: var(--text-tertiary); margin-top: 6px; }
+.fair-popover-summary{ margin-top: 8px; }
+.fair-popover-summary dd{ color: var(--text-primary); font-weight: 600; }
+.fair-popover-note{ font-size: 10.5px; line-height: 1.5; color: var(--text-tertiary); margin-top: 10px; }
+.fair-demo-note{ margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-soft); }
+
+/* Editable public-randomness field: a real input, not just a display
+   value — the player can set their own before the round locks (see
+   renderFairPopover in script.js for exactly when it's editable). */
+.fair-randomness-cell{ display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+.fair-randomness-input{
+  min-width: 0;
+  width: 100%;
+  background: var(--surface-3);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  padding: 4px 7px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-primary);
+  text-align: left;
+}
+.fair-randomness-input:disabled{ color: var(--text-tertiary); background: var(--surface-2); }
+.fair-randomness-regen{
+  width: 24px; height: 24px; flex-shrink: 0;
+  border-radius: var(--radius-sm);
+}
+.fair-randomness-regen:disabled{ opacity: 0.35; cursor: not-allowed; }
+.fair-randomness-cell-wrap{ display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+.fair-randomness-hint{ font-size: 9.5px; color: var(--text-tertiary); text-align: right; min-height: 12px; }
+
+.fair-verify-btn{ margin-top: 12px; }
+.fair-verify-status{
+  margin: 8px 0 0;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  padding: 6px 0;
+  border-radius: var(--radius-sm);
+}
+.fair-verify-status[hidden]{ display: none; }
+.fair-verify-status.is-checking{ color: var(--text-tertiary); background: var(--surface-3); }
+.fair-verify-status.is-verified{ color: var(--success-1); background: rgba(186,255,107,0.08); }
+.fair-verify-status.is-mismatch{ color: var(--crash-1); background: rgba(255,84,104,0.08); }
+.fair-verify-status.is-missing{ color: var(--text-tertiary); background: var(--surface-3); }
+
+/* Per-history-row verify link — reuses the same popover/verification flow
+   against that row's own settled fairness data instead of the live round. */
+.history-verify-btn{
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  flex-shrink: 0;
+}
+.history-verify-btn:hover{ color: var(--cruise-1); }
+.history-verify-status{
+  font-size: 10.5px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.history-verify-status.is-checking{ color: var(--text-tertiary); }
+.history-verify-status.is-verified{ color: var(--success-1); }
+.history-verify-status.is-mismatch{ color: var(--crash-1); }
+.history-verify-status.is-missing{ color: var(--text-tertiary); }
 
 /* "?" how-to-play trigger sits inline with the brand row */
 #howToPlayBtn{
@@ -445,7 +526,11 @@ kbd{
 }
 .bet-controls{
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* Bet Amount is the primary, high-frequency decision (stepper + 4 quick
+     chips); Auto Cashout is a secondary, opt-in toggle with a single small
+     field. A 50/50 split gave it equal visual weight it hadn't earned —
+     weighted instead so Bet Amount reads as the dominant control. */
+  grid-template-columns: 1.7fr 1fr;
   gap: 14px;
 }
 .field-label{
@@ -494,6 +579,10 @@ kbd{
   color: var(--text-primary);
 }
 .amount-input-wrap input:disabled{ color: var(--text-tertiary); }
+/* Auto-cashout field shows its placeholder (not a stale typed value) while
+   toggled off — script.js clears .value on disable, so this is what's
+   actually visible: a dim example number, not a number that looks live. */
+.amount-input-wrap input::placeholder{ color: var(--text-tertiary); opacity: 1; }
 
 .quick-chips{ display: flex; gap: 6px; margin-top: 8px; }
 .chip{
@@ -572,6 +661,27 @@ kbd{
   0%, 100%{ box-shadow: 0 8px 28px rgba(186,255,107,0.3), inset 0 1px 0 rgba(255,255,255,0.5); }
   50%{ box-shadow: 0 8px 34px rgba(186,255,107,0.55), inset 0 1px 0 rgba(255,255,255,0.5); }
 }
+
+/* Space-key hint: tucked into the main button's own bottom-right corner
+   instead of a row of its own — zero layout cost. `color: currentColor`
+   means it automatically matches whatever text color the button's current
+   state uses (state-cashout, state-success, state-crashed, etc.) without
+   needing a per-state override; opacity alone keeps it quiet. Only ever
+   shown while Space would actually do something (see renderSpaceHint in
+   script.js), and gone for good after the player's first press. */
+.space-tag{
+  position: absolute;
+  right: 12px;
+  bottom: 5px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: currentColor;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .2s var(--ease-out);
+}
+.space-tag.is-visible{ opacity: 0.5; }
 
 /* ---------------------------------------------------------------------- */
 /* 7. Side panel                                                          */
@@ -731,6 +841,8 @@ kbd{
   overflow-x: auto;
   padding: 0 2px;
   scrollbar-width: none;
+  flex: 1;
+  min-width: 0;
 }
 .recent-rounds::-webkit-scrollbar{ display: none; }
 .recent-rounds[hidden]{ display: none; }
@@ -839,7 +951,7 @@ kbd{
     padding-right: max(12px, env(safe-area-inset-right));
   }
   .brand-name{ font-size: 15px; letter-spacing: 0.14em; }
-  .fair-badge{ display: none; }
+  .fair-badge{ font-size: 10px; padding: 4px 8px; }
   .balance-value{ font-size: 13px; }
   .balance{ padding: 3px 10px; }
 

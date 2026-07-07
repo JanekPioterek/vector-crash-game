@@ -21,22 +21,6 @@
       </svg>
     </span>
     <span class="brand-name">VECTOR</span>
-    <button class="fair-badge" id="fairBadge" type="button" aria-haspopup="dialog" aria-expanded="false">
-      <svg viewBox="0 0 20 20" width="12" height="12" aria-hidden="true"><path fill="currentColor" d="M10 1l7 3v5c0 5-3.4 8.7-7 10-3.6-1.3-7-5-7-10V4l7-3z"/></svg>
-      Provably Fair
-    </button>
-    <div class="fair-popover" id="fairPopover" role="dialog" aria-label="Provably fair details" hidden>
-      <p class="fair-popover-title">Round Verification</p>
-      <dl>
-        <dt>Round</dt><dd id="fairRound">—</dd>
-        <dt>Server Seed Hash</dt><dd id="fairSeed">—</dd>
-        <dt>Server Seed</dt><dd id="fairSeedRevealed">Revealed after round</dd>
-        <dt>Result</dt><dd id="fairResult">—</dd>
-        <dt>House Edge</dt><dd id="fairEdge">—</dd>
-      </dl>
-      <p class="fair-popover-note">The Server Seed Hash is a real SHA-256 digest of this round's seed, computed before the round starts — the crash point is derived from that seed and cannot be influenced by anything you do in-round. The raw seed is revealed above once the round resolves, so you can hash it yourself and confirm it matches. This prototype runs that check entirely in your browser — it is not yet backed by a server commit published independently of the client.</p>
-    </div>
-
     <button class="icon-btn" id="howToPlayBtn" type="button" aria-label="How to play" aria-haspopup="dialog">?</button>
   </div>
 
@@ -93,7 +77,7 @@
     <p>The round can collapse at any moment. If it does before you cash out, the bet is lost. The collapse point is generated and locked in before the round starts, so nothing you do in-round changes it.</p>
     <p>Missed the start? Tap <strong>Bet Next Round</strong> during a flight and your bet is placed automatically when the next round opens.</p>
     <p>Once your bet is flying, <strong>Bank Half</strong> lets you lock in half your stake at the current multiplier while the rest keeps riding — available once per bet.</p>
-    <p>The odds are the same every round for every player: over the long run the game returns about 95% of everything wagered (a ~5% house edge). No streaks, no hot or cold rounds.</p>
+    <p>The odds are the same every round for every player: over the long run the game returns 98.00% of everything wagered (a 2.00% house edge), calculated as VECTOR-PF-v1. No streaks, no hot or cold rounds — tap the fairness badge below the stage to verify any round yourself.</p>
     <p>Keyboard: <kbd>Space</kbd> places your bet or cashes out.</p>
     <p class="modal-disclaimer">Demo prototype — no real money. Balances and results are simulated entirely in your browser.</p>
     <button type="button" class="btn btn-main" id="howToPlayClose">Got it</button>
@@ -147,8 +131,60 @@
       <div class="crash-flash" id="crashFlash" aria-hidden="true"></div>
     </section>
 
-    <!-- Recent round results, newest first -->
-    <div class="recent-rounds" id="recentRounds" role="list" aria-label="Recent round results" hidden></div>
+    <!-- Round metadata row: a compact fairness/RTP badge beside the recent
+         results strip — both are "round status" indicators, so they live
+         together below the stage rather than in the header or the betting
+         controls. -->
+    <div class="stage-meta-row">
+      <div class="fair-badge-wrap">
+        <button class="fair-badge" id="fairBadge" type="button" aria-haspopup="dialog" aria-expanded="false">
+          <svg viewBox="0 0 20 20" width="12" height="12" aria-hidden="true"><path fill="currentColor" d="M10 1l7 3v5c0 5-3.4 8.7-7 10-3.6-1.3-7-5-7-10V4l7-3z"/></svg>
+          98% RTP · Provably Fair
+        </button>
+
+        <div class="fair-popover" id="fairPopover" role="dialog" aria-label="Provably fair details" hidden>
+          <p class="fair-popover-title">Provably Fair</p>
+          <dl class="fair-popover-summary">
+            <dt>RTP</dt><dd>98.00%</dd>
+            <dt>House Edge</dt><dd>2.00%</dd>
+            <dt>Calculation</dt><dd>VECTOR-PF-v1</dd>
+          </dl>
+
+          <p class="fair-popover-section-title">This round</p>
+          <dl>
+            <dt>Round ID</dt><dd id="fairRound">—</dd>
+            <dt>Server Seed Hash</dt><dd id="fairSeedHash">—</dd>
+            <dt>Public Randomness</dt>
+            <dd class="fair-randomness-cell-wrap">
+              <div class="fair-randomness-cell">
+                <input type="text" id="fairRandomnessInput" class="fair-randomness-input" aria-label="Public randomness — edit to set your own for the next round" />
+                <button type="button" class="icon-btn fair-randomness-regen" id="fairRandomnessRegen" aria-label="Generate new public randomness">
+                  <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path fill="currentColor" d="M17.65 6.35A8 8 0 1019.94 14h-2.02a6 6 0 11-1.55-6.12L13 11h7V4l-2.35 2.35z"/></svg>
+                </button>
+              </div>
+              <span class="fair-randomness-hint" id="fairRandomnessHint"></span>
+            </dd>
+            <dt>Crash Result</dt><dd id="fairResult">Pending — locked in</dd>
+          </dl>
+
+          <p class="fair-popover-section-title">After round settlement</p>
+          <dl>
+            <dt>Server Seed</dt><dd id="fairSeedRevealed">—</dd>
+            <dt>Entropy Hash</dt><dd id="fairEntropyHash">—</dd>
+          </dl>
+
+          <p class="fair-popover-note">VECTOR commits to a hidden server seed before betting opens. After the round, the seed is revealed so you can verify that the crash result was fixed before bets were placed. Your stake, cash-out choice and Bank Half action never affect the result.</p>
+
+          <button type="button" class="settings-reset-btn fair-verify-btn" id="fairVerifyBtn">Verify Round</button>
+          <p class="fair-verify-status" id="fairVerifyStatus" hidden></p>
+
+          <p class="fair-popover-note fair-demo-note">Demo mode: this seed is generated and held in your browser tab, not on a real server — see Verify Round for exactly what that does and doesn't prove.</p>
+        </div>
+      </div>
+
+      <!-- Recent round results, newest first -->
+      <div class="recent-rounds" id="recentRounds" role="list" aria-label="Recent round results" hidden></div>
+    </div>
 
     <!-- ---------------- BETTING PANEL ---------------- -->
     <section class="betting-panel" aria-label="Place your bet">
@@ -181,7 +217,7 @@
             </button>
           </div>
           <div class="amount-input-wrap auto-input">
-            <input type="number" id="autoCashoutValue" inputmode="decimal" min="1.01" max="1000" step="0.1" value="2.00" aria-label="Auto cashout multiplier" disabled />
+            <input type="number" id="autoCashoutValue" inputmode="decimal" min="1.01" max="1000" step="0.1" placeholder="2.00" aria-label="Auto cashout multiplier" disabled />
             <span class="x-suffix" aria-hidden="true">x</span>
           </div>
         </div>
@@ -191,6 +227,10 @@
         <button type="button" class="btn btn-secondary" id="partialCashoutBtn" hidden>BANK HALF</button>
         <button type="button" class="btn btn-main" id="mainActionBtn" aria-live="polite">
           <span id="mainActionLabel">PLACE BET</span>
+          <!-- Keyboard hint: tucked into the button's own corner rather than
+               taking a row of its own. Only shown while Space would actually
+               do something, and only until the player has pressed it once. -->
+          <span class="space-tag" id="spaceHint" aria-hidden="true">SPACE</span>
         </button>
       </div>
     </section>
@@ -226,6 +266,7 @@
   Demo prototype — no real money. Balances and results are simulated client-side.
 </footer>
 
+<script src="roundProvider.js"></script>
 <script src="script.js"></script>
 </body>
 </html>
