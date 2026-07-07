@@ -8,9 +8,8 @@
 //   PART B — game-integration tests against the real script.js running in
 //            the same headless DOM stub as _domtest.js, using deterministic
 //            forced clocks/crash points to hit exact multipliers: cashout
-//            math, auto cashout, no-cashout-after-crash, Bank Half payout/
-//            one-use/no-new-randomness, shared round result across NPCs,
-//            and result immutability once a round is running.
+//            math, auto cashout, no-cashout-after-crash, shared round result
+//            across NPCs, and result immutability once a round is running.
 //
 // This intentionally does not reuse _domtest.js's process — it boots its
 // own isolated stub each time a fresh round state is needed, so one test's
@@ -385,92 +384,6 @@ async function runGameTests() {
     check(
       "clicking the action button after a crash does not create a new cashout payout",
       state.balance === balanceBeforeClick && (!betAfterCrash || betAfterCrash.cashedOutAtMultiplier == null)
-    );
-  }
-
-  // ---- Bank Half: correct payout, one-use, no new randomness ----
-  {
-    const game = bootGame();
-    await waitForCommit(game);
-    const state = game.debug().state;
-    const config = game.debug().CONFIG;
-    state.crashPoint = 50;
-    state.fairness.crashMultiplier = 50;
-    const crashPointBeforeBankHalf = state.fairness.crashMultiplier;
-    const entropyHashBefore = state.fairness.entropyHash;
-    game.el("mainActionBtn").click();
-    await waitForPhase(game, "running", 550);
-    const startMs = game.getClock();
-
-    // Bank Half at 2.00x.
-    const t2 = timeToReachMultiplier(2, config);
-    game.setClock(startMs + t2 * 1000 + 16);
-    game.tick(16);
-    await game.settle();
-    const bankHalfBtn = game.el("partialCashoutBtn");
-    bankHalfBtn.click();
-    await game.settle();
-    const afterBankHalf = JSON.parse(JSON.stringify({
-      remainingAmount: state.bet.remainingAmount,
-      partials: state.bet.partials,
-      resolved: state.bet.resolved,
-    }));
-
-    check(
-      "Bank Half locks half the stake at the multiplier it was used and halves the live remaining stake",
-      // atMultiplier/payout land a hair above 2.00/10.00 rather than exactly
-      // on it — this harness ticks in 16ms steps and lands just after the
-      // exact target instant, not on it (unlike the dedicated exact-2.00x
-      // cashout test above, which deliberately lands one tick early first).
-      Math.abs(afterBankHalf.partials[0].amount - 5) < 1e-6 &&
-        Math.abs(afterBankHalf.partials[0].atMultiplier - 2) < 0.05 &&
-        Math.abs(afterBankHalf.partials[0].payout - 10) < 0.1 &&
-        Math.abs(afterBankHalf.remainingAmount - 5) < 1e-6
-    );
-    check(
-      "Bank Half does not touch the round's committed crash multiplier or entropy hash (no new randomness)",
-      state.fairness.crashMultiplier === crashPointBeforeBankHalf && state.fairness.entropyHash === entropyHashBefore
-    );
-    check(
-      "Bank Half is capped at one use per bet (button becomes ineligible/hidden immediately after use, and a second call is a no-op)",
-      bankHalfBtn.hidden === true && state.bet.partials.length === 1
-    );
-
-    // Cash out the remaining $5 at 4.00x -> total should be $10 (banked) + $20 (remaining) = $30, net +$20.
-    const t4 = timeToReachMultiplier(4, config);
-    game.setClock(startMs + t4 * 1000 + 16);
-    game.tick(16);
-    await game.settle();
-    const balanceBeforeFinal = state.balance;
-    game.el("mainActionBtn").click();
-    await game.settle();
-    check(
-      `Bank Half + final cashout totals correctly ($10 stake, bank at 2x, remainder cashed at 4x -> net +$20, got finalNet=${state.bet && state.bet.finalNet})`,
-      state.bet && Math.abs(state.bet.finalNet - 20) < 0.1
-    );
-  }
-
-  // ---- Bank Half: crash before second cashout keeps only the banked amount ----
-  {
-    const game = bootGame();
-    await waitForCommit(game);
-    const state = game.debug().state;
-    const config = game.debug().CONFIG;
-    state.crashPoint = 2.5; // crashes shortly after the bank-half point
-    state.fairness.crashMultiplier = 2.5;
-    game.el("mainActionBtn").click();
-    await waitForPhase(game, "running", 550);
-    const startMs = game.getClock();
-    const t2 = timeToReachMultiplier(2, config);
-    game.setClock(startMs + t2 * 1000 + 16);
-    game.tick(16);
-    await game.settle();
-    game.el("partialCashoutBtn").click();
-    await game.settle();
-    await waitForPhase(game, "result", 400); // let the remaining half ride into the crash
-    check(
-      `Bank Half then a crash before the second cashout: final payout stays at the banked amount only (finalNet=${state.bet && state.bet.finalNet})`,
-      state.bet && Math.abs(state.bet.finalNet - 0) < 0.1 // $10 stake, $10 banked back = net 0
     );
   }
 

@@ -76,7 +76,6 @@
     <p>Every round the multiplier climbs steadily from 1.00x — cash out any time to bank your bet at the current multiplier.</p>
     <p>The round can collapse at any moment. If it does before you cash out, the bet is lost. The collapse point is generated and locked in before the round starts, so nothing you do in-round changes it.</p>
     <p>Missed the start? Tap <strong>Bet Next Round</strong> during a flight and your bet is placed automatically when the next round opens.</p>
-    <p>Once your bet is flying, <strong>Bank Half</strong> lets you lock in half your stake at the current multiplier while the rest keeps riding — available once per bet.</p>
     <p>The odds are the same every round for every player: over the long run the game returns 98.00% of everything wagered (a 2.00% house edge), calculated as VECTOR-PF-v1. No streaks, no hot or cold rounds — tap the fairness badge below the stage to verify any round yourself.</p>
     <p>Keyboard: <kbd>Space</kbd> places your bet or cashes out.</p>
     <p class="modal-disclaimer">Demo prototype — no real money. Balances and results are simulated entirely in your browser.</p>
@@ -173,7 +172,7 @@
             <dt>Entropy Hash</dt><dd id="fairEntropyHash">—</dd>
           </dl>
 
-          <p class="fair-popover-note">VECTOR commits to a hidden server seed before betting opens. After the round, the seed is revealed so you can verify that the crash result was fixed before bets were placed. Low multipliers can happen, including in consecutive rounds — that is expected, mathematically fair variance, not a malfunction. Your stake, cash-out choice and Bank Half action never affect the result.</p>
+          <p class="fair-popover-note">VECTOR commits to a hidden server seed before betting opens. After the round, the seed is revealed so you can verify that the crash result was fixed before bets were placed. Low multipliers can happen, including in consecutive rounds — that is expected, mathematically fair variance, not a malfunction. Your stake and cash-out choice never affect the result.</p>
 
           <button type="button" class="settings-reset-btn fair-verify-btn" id="fairVerifyBtn">Verify Round</button>
           <p class="fair-verify-status" id="fairVerifyStatus" hidden></p>
@@ -223,8 +222,7 @@
         </div>
       </div>
 
-      <div class="action-row" id="actionRow">
-        <button type="button" class="btn btn-secondary" id="partialCashoutBtn" hidden>BANK HALF</button>
+      <div class="action-row">
         <button type="button" class="btn btn-main" id="mainActionBtn" aria-live="polite">
           <span id="mainActionLabel">PLACE BET</span>
           <!-- Keyboard hint: tucked into the button's own corner rather than

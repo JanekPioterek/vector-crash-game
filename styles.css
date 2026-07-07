@@ -660,7 +660,6 @@ kbd{
 .toggle[aria-checked="true"] .toggle-thumb{ transform: translateX(16px); background: var(--cruise-1); }
 
 .action-row{ display: grid; grid-template-columns: 1fr; gap: 10px; }
-.action-row.has-partial{ grid-template-columns: 0.85fr 1.4fr; }
 .btn{
   position: relative;
   padding: 16px 18px;
@@ -927,19 +926,6 @@ kbd{
   box-shadow: none;
 }
 .btn-main.state-queued:hover:not(:disabled){ filter: none; background: var(--surface-2); }
-
-/* Bank Half — deliberately quieter than the main cashout button (an
-   optional side decision, not the primary action) and hidden entirely
-   whenever it isn't a valid move, via [hidden] rather than opacity so it
-   never intercepts clicks. */
-.btn-secondary{
-  background: var(--surface-2);
-  color: var(--text-secondary);
-  border: 1px solid var(--border-soft);
-  box-shadow: none;
-}
-.btn-secondary:hover:not(:disabled){ color: var(--text-primary); border-color: var(--border-strong); background: var(--surface-3); }
-.btn-secondary[hidden]{ display: none; }
 
 /* Settings: session loss-reminder threshold field, same shape as the
    auto-cashout field above it in the betting panel */

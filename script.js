@@ -183,8 +183,6 @@
     autoCashoutToggle: document.getElementById("autoCashoutToggle"),
     autoCashoutValue: document.getElementById("autoCashoutValue"),
 
-    actionRow: document.getElementById("actionRow"),
-    partialCashoutBtn: document.getElementById("partialCashoutBtn"),
     mainActionBtn: document.getElementById("mainActionBtn"),
     mainActionLabel: document.getElementById("mainActionLabel"),
     spaceHint: document.getElementById("spaceHint"),
@@ -235,11 +233,9 @@
     countdownEndTime: null,
     resultEndTime: null,
 
-    // { amount, remainingAmount, partials, cashedOutAtMultiplier, resolved, lost, finalNet }
-    // `amount` is the original stake and never changes after commitBet;
-    // `remainingAmount` is what's still actually at risk, and is what every
-    // payout/crash/auto-cashout calculation operates on — it only differs
-    // from `amount` once a partial cash-out has been taken.
+    // { amount, cashedOutAtMultiplier, resolved, lost, finalNet }
+    // `amount` is the original stake, fixed for the life of the bet — every
+    // payout/crash/auto-cashout calculation operates on it directly.
     bet: null,
     queuedBet: null, // dollar amount queued mid-round, auto-placed when the next round's betting opens
     betAmount: 10,
@@ -512,12 +508,9 @@
     if (state.bet && !state.bet.resolved) {
       state.bet.resolved = true;
       state.bet.lost = true;
-      // Only the portion still at risk is lost — any partial cash-out taken
-      // earlier already left the building and stays banked in the balance.
-      const lostAmount = state.bet.remainingAmount;
+      const lostAmount = state.bet.amount;
       state.session.net -= lostAmount;
-      const partialsPayout = state.bet.partials.reduce((sum, p) => sum + p.payout, 0);
-      state.bet.finalNet = partialsPayout - state.bet.amount;
+      state.bet.finalNet = -state.bet.amount;
       announce(`Collapsed at ${formatMult(state.crashPoint)} — lost ${formatMoney(lostAmount)}`);
       checkGuardrail();
     } else {
@@ -525,7 +518,7 @@
     }
 
     // Pushed after the bet is fully resolved so history/finalNet reflects
-    // the complete outcome, including any partial cash-out already banked.
+    // the complete outcome.
     pushHistory(state.crashPoint);
     flashCrash();
     playSound("crash");
@@ -639,8 +632,6 @@
     state.balance -= amount;
     state.bet = {
       amount,
-      remainingAmount: amount, // what's still actually at risk; shrinks on a partial cash-out
-      partials: [], // { atMultiplier, amount, payout } — at most one entry in this MVP
       cashedOutAtMultiplier: null,
       resolved: false,
       lost: false,
@@ -708,16 +699,12 @@
     state.bet.cashedOutAtMultiplier = multiplier;
     state.bet.resolved = true;
 
-    // Only the portion still at risk settles here — any partial cash-out
-    // already banked its own payout earlier and isn't touched again.
-    const stake = state.bet.remainingAmount;
+    const stake = state.bet.amount;
     const payout = stake * multiplier;
     const legNet = payout - stake;
     state.balance += payout;
     state.session.net += legNet;
-
-    const partialsPayout = state.bet.partials.reduce((sum, p) => sum + p.payout, 0);
-    state.bet.finalNet = partialsPayout + payout - state.bet.amount;
+    state.bet.finalNet = legNet;
 
     // Jump-to-lightspeed departure: the ship rockets forward into the
     // vanishing point and vanishes over CONFIG.CASHOUT_WARP_MS. Purely
@@ -734,36 +721,6 @@
     announce(`${isAuto ? "Auto cashed" : "Cashed"} out at ${formatMult(multiplier)} — net win +${formatMoney(state.bet.finalNet)}`);
     checkGuardrail();
     renderAll();
-  }
-
-  // Partial cash-out ("Bank Half"): one decision, no new mode. Banks half of
-  // whatever is still at risk at the current multiplier straight into the
-  // balance; the other half keeps flying under the exact same rules as
-  // before (can still hit auto-cashout, manual cash-out, or the crash).
-  // Capped at one partial per bet — deliberately not a repeatable ladder —
-  // so it stays a single moment of tension release, not a new sub-system.
-  function partialCashOut() {
-    if (state.phase !== PHASE.RUNNING) return;
-    if (!state.bet || state.bet.resolved) return;
-    if (state.bet.partials.length > 0) return;
-
-    const multiplier = state.currentMultiplier;
-    const stake = state.bet.remainingAmount;
-    const portion = Math.round((stake / 2) * 100) / 100;
-    const payout = portion * multiplier;
-
-    state.bet.remainingAmount = Math.round((stake - portion) * 100) / 100;
-    state.bet.partials.push({ atMultiplier: multiplier, amount: portion, payout });
-    state.balance += payout;
-    state.session.net += payout - portion;
-
-    playSound("cashout");
-    announce(`Banked ${formatMoney(payout)} at ${formatMult(multiplier)} — ${formatMoney(state.bet.remainingAmount)} still flying`);
-    checkGuardrail();
-    renderBalance();
-    renderMainButton();
-    renderPartialButton();
-    renderLiveBets();
   }
 
   /* ------------------------------------------------------------------ */
@@ -926,9 +883,8 @@
   function pushHistory(crashPoint) {
     // Record the player's own net result for this round (null if they sat
     // it out). Prefers bet.finalNet — set at resolution in cashOut/
-    // triggerCrash — since that's the only figure that correctly accounts
-    // for a partial cash-out; falls back to the simple calc for safety if
-    // a bet somehow reached here unresolved.
+    // triggerCrash — falling back to the simple calc for safety if a bet
+    // somehow reached here unresolved.
     const bet = state.bet;
     let playerNet = null;
     if (bet) {
@@ -982,7 +938,6 @@
     renderModeLabel();
     renderMultiplier();
     renderMainButton();
-    renderPartialButton();
     renderSpaceHint();
     renderResultBanner();
     renderAutoPill();
@@ -1163,10 +1118,7 @@
         btn.classList.add("state-success");
         btn.disabled = true;
       } else {
-        // Only the portion still at risk is what cashing out now would pay —
-        // that's remainingAmount, not the original stake, once a partial has
-        // already been banked.
-        const payout = state.bet.remainingAmount * state.currentMultiplier;
+        const payout = state.bet.amount * state.currentMultiplier;
         label.textContent = `CASH OUT ${formatMoney(payout)}`;
         btn.classList.add("state-cashout");
       }
@@ -1181,10 +1133,7 @@
         btn.classList.add("state-success");
         btn.disabled = true;
       } else if (state.bet && state.bet.lost) {
-        // A partial cash-out taken earlier can outweigh the loss on the
-        // portion that crashed — finalNet (set in triggerCrash) is the
-        // honest number, not just "the stake is gone".
-        const net = state.bet.finalNet != null ? state.bet.finalNet : -state.bet.remainingAmount;
+        const net = state.bet.finalNet != null ? state.bet.finalNet : -state.bet.amount;
         if (net >= 0) {
           label.textContent = `COLLAPSED — NET +${formatMoney(net)}`;
           btn.classList.add("state-success");
@@ -1205,26 +1154,6 @@
         const amount = clampBetAmount(Number(el.betAmountInput.value));
         btn.disabled = amount > state.balance;
       }
-    }
-  }
-
-  // Shows the secondary "BANK HALF" button only in the one window where
-  // it's a valid, still-fresh decision: a live, unresolved bet, mid-flight,
-  // with no partial taken yet. Toggles a layout class on the action row so
-  // it only ever grows to two buttons when there's genuinely a second
-  // action to take — every other state stays the plain single full-width
-  // button.
-  function renderPartialButton() {
-    if (!el.partialCashoutBtn || !el.actionRow) return;
-    const eligible =
-      state.phase === PHASE.RUNNING &&
-      state.bet && !state.bet.resolved &&
-      state.bet.partials.length === 0;
-    el.partialCashoutBtn.hidden = !eligible;
-    el.actionRow.classList.toggle("has-partial", eligible);
-    if (eligible) {
-      const portion = Math.round((state.bet.remainingAmount / 2) * 100) / 100;
-      el.partialCashoutBtn.textContent = `BANK ${formatMoney(portion)}`;
     }
   }
 
@@ -1270,18 +1199,14 @@
     if (state.bet && state.bet.cashedOutAtMultiplier) {
       // Net win, not total return — "+$13.50" must equal what the balance
       // actually gained versus before the round, or the number reads as a
-      // bigger win than it was. finalNet already folds in any partial
-      // cash-out taken earlier in the same round.
+      // bigger win than it was.
       const net = state.bet.finalNet != null
         ? state.bet.finalNet
         : state.bet.amount * (state.bet.cashedOutAtMultiplier - 1);
       banner.className = "result-banner success fade-in";
       banner.innerHTML = `CASHED OUT AT ${formatMult(state.bet.cashedOutAtMultiplier)}<span class="payout-line">+${formatMoney(net)} net win</span>`;
     } else if (state.bet && state.bet.lost) {
-      // A partial banked before the crash can outweigh the loss on the
-      // portion that didn't make it — show the honest overall result
-      // rather than implying the whole stake was lost.
-      const net = state.bet.finalNet != null ? state.bet.finalNet : -state.bet.remainingAmount;
+      const net = state.bet.finalNet != null ? state.bet.finalNet : -state.bet.amount;
       if (net >= 0) {
         banner.className = "result-banner success fade-in";
         banner.innerHTML = `COLLAPSED AT ${formatMult(state.crashPoint)}<span class="payout-line">+${formatMoney(net)} net win</span>`;
@@ -1361,12 +1286,7 @@
             ? { cls: "tag-crash", text: "CRASH" }
             : { cls: "tag-cashed", text: "CASHED OUT" }
           : { cls: "tag-waiting", text: state.phase === PHASE.COUNTDOWN ? "PENDING" : "IN FLIGHT" };
-        // Once a partial has been banked, the row shows what's actually
-        // still at risk rather than the original stake — that's the number
-        // that matters for the rest of the round.
-        const hasPartial = state.bet.partials.length > 0;
-        const displayAmount = hasPartial ? state.bet.remainingAmount : state.bet.amount;
-        frag.appendChild(buildBetRow(hasPartial ? "You (partial)" : "You", displayAmount, tag.cls, tag.text, true, SELF_SHIP_COLOR));
+        frag.appendChild(buildBetRow("You", state.bet.amount, tag.cls, tag.text, true, SELF_SHIP_COLOR));
         rowCount++;
       }
     } catch (err) {
@@ -2637,8 +2557,6 @@
         if (e.target === el.guardrailOverlay) hideGuardrailReminder();
       });
     }
-
-    if (el.partialCashoutBtn) el.partialCashoutBtn.addEventListener("click", partialCashOut);
 
     // Settings popover
     el.settingsBtn.addEventListener("click", () => {
